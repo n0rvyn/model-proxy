@@ -4,7 +4,7 @@ import Foundation
 
 struct TranscriptProjectorTests {
 
-    @Test func portableRequestKeepsThinkingContentStripsSignatureAndKeepsThinkingConfig() throws {
+    @Test func vendorReadyRequestKeepsThinkingStripsSignatureButPortableHashesStripThinking() throws {
         let projector = TranscriptProjector()
         let target = RoutingSnapshot.RouteTarget(
             baseURL: "https://coding.dashscope.aliyuncs.com/apps/anthropic",
@@ -35,6 +35,7 @@ struct TranscriptProjectorTests {
             fingerprint: ConversationFingerprint()
         )
 
+        // Request body should have thinking (signature stripped) — vendor needs it.
         let json = try jsonObject(prepared.bodyData)
         let messages = try #require(json["messages"] as? [[String: Any]])
         let thinkingConfig = try #require(json["thinking"] as? [String: Any])
@@ -46,6 +47,14 @@ struct TranscriptProjectorTests {
         #expect(thinkingBlock["signature"] == nil)
         #expect(thinkingBlock["thinking"] as? String == "secret")
         #expect(assistantBlocks.contains { $0["type"] as? String == "text" })
+
+        // Portable messages should have thinking stripped — for hash consistency.
+        let portableData = try #require(prepared.projectedPortableMessagesData)
+        let portableMessages = try #require(try JSONSerialization.jsonObject(with: portableData) as? [[String: Any]])
+        let portableAssistant = try #require(portableMessages.first?["content"] as? [[String: Any]])
+        #expect(portableAssistant.count == 1)
+        #expect(portableAssistant.first?["type"] as? String == "text")
+
         #expect(prepared.context != nil)
     }
 

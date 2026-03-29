@@ -6,7 +6,7 @@ import NIOCore
 @Suite(.serialized)
 struct BranchMergeReducerTests {
 
-    @Test func reducerKeepsThinkingButStripsSignatureFromPortableTurn() throws {
+    @Test func reducerRemovesThinkingAndSignatureFromPortableTurn() throws {
         let reducer = BranchMergeReducer()
         let turn = try reducer.reduceAssistantMessage([
             "role": "assistant",
@@ -19,14 +19,10 @@ struct BranchMergeReducerTests {
 
         let portable = try #require(try JSONSerialization.jsonObject(with: turn.portableMessageData) as? [String: Any])
         let blocks = try #require(portable["content"] as? [[String: Any]])
-        #expect(blocks.count == 3)
-        #expect(blocks.contains { $0["type"] as? String == "thinking" })
+        #expect(blocks.count == 2)
         #expect(blocks.contains { $0["type"] as? String == "tool_use" })
         #expect(blocks.contains { $0["type"] as? String == "text" })
-        // Signature must be stripped from the thinking block.
-        let thinkingBlock = try #require(blocks.first { $0["type"] as? String == "thinking" })
-        #expect(thinkingBlock["signature"] == nil)
-        #expect(thinkingBlock["thinking"] as? String == "private")
+        #expect(!blocks.contains { $0["type"] as? String == "thinking" })
     }
 
     @Test func projectorNormalizesInvalidToolUseIDsAcrossMessages() throws {
@@ -79,7 +75,7 @@ struct BranchMergeReducerTests {
         #expect(portableBlocks.first?["id"] as? String == expectedID)
     }
 
-    @Test func jsonNormalizerKeepsThinkingButStripsSignatureFromResponse() throws {
+    @Test func jsonNormalizerStripsReplaySensitiveBlocksFromResponse() throws {
         let normalizer = PortableContentNormalizer()
         let response = try JSONSerialization.data(withJSONObject: [
             "id": "msg_1",
@@ -93,22 +89,18 @@ struct BranchMergeReducerTests {
         let normalized = try normalizer.normalizeJSONBody(response)
         let json = try #require(try JSONSerialization.jsonObject(with: normalized.bodyData) as? [String: Any])
         let blocks = try #require(json["content"] as? [[String: Any]])
-        #expect(blocks.count == 2)
-        let thinkingBlock = try #require(blocks.first { $0["type"] as? String == "thinking" })
-        #expect(thinkingBlock["signature"] == nil)
-        #expect(thinkingBlock["thinking"] as? String == "secret")
-        #expect(blocks.contains { $0["text"] as? String == "Commit created" })
+        #expect(blocks.count == 1)
+        #expect(blocks.first?["text"] as? String == "Commit created")
         #expect(normalized.assistantTurn != nil)
     }
 
-    @Test func sseNormalizerForwardsThinkingEventsButSuppressesSignatureDelta() throws {
+    @Test func sseNormalizerSuppressesThinkingEventsButKeepsFullTurnInternally() throws {
         let normalizer = PortableContentNormalizer().makeSSEStreamNormalizer()
         let allocator = ByteBufferAllocator()
 
         let events = [
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig_qwen\"}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"secret\"}}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_final\"}}\n\n",
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Visible output\"}}\n\n",
@@ -124,14 +116,7 @@ struct BranchMergeReducerTests {
         }
 
         let text = String(data: output, encoding: .utf8) ?? ""
-        // Thinking content is forwarded (thinking_delta passes through).
-        #expect(text.contains("thinking_delta"))
-        #expect(text.contains("secret"))
-        // Signature is stripped from content_block_start, signature_delta is suppressed.
-        #expect(!text.contains("sig_qwen"))
-        #expect(!text.contains("signature_delta"))
-        #expect(!text.contains("sig_final"))
-        // Text content is forwarded.
+        #expect(!text.contains("\"thinking\""))
         #expect(text.contains("Visible output"))
 
         let finishedTurn = try normalizer.finish()
@@ -256,77 +241,25 @@ struct BranchMergeReducerTests {
         #expect(secondTurn == nil)
     }
 
-    @Test func stripUnsignedThinkingBlocksRemovesUnsignedAndKeepsSigned() throws {
-        let body = try JSONSerialization.data(withJSONObject: [
-            "model": "claude-3-opus",
-            "messages": [
-                [
-                    "role": "user",
-                    "content": [["type": "text", "text": "hello"]]
-                ],
-                [
-                    "role": "assistant",
-                    "content": [
-                        ["type": "thinking", "thinking": "signed thought", "signature": "sig_anthropic"],
-                        ["type": "thinking", "thinking": "unsigned from qwen"],
-                        ["type": "text", "text": "response"]
-                    ]
+    @Test func vendorReadyMessagesKeepThinkingButStripSignatureAndRedactedThinking() throws {
+        let messages: [[String: Any]] = [
+            [
+                "role": "assistant",
+                "content": [
+                    ["type": "thinking", "thinking": "vendor thought", "signature": "sig_vendor"],
+                    ["type": "redacted_thinking", "data": "opaque"],
+                    ["type": "text", "text": "visible"]
                 ]
             ]
-        ], options: [.sortedKeys])
+        ]
 
-        let result = ProxyForwarder.stripUnsignedThinkingBlocks(body)
-        #expect(result.strippedCount == 1)
-
-        let json = try #require(try JSONSerialization.jsonObject(with: result.bodyData) as? [String: Any])
-        let messages = try #require(json["messages"] as? [[String: Any]])
-        let assistantBlocks = try #require(messages[1]["content"] as? [[String: Any]])
-        #expect(assistantBlocks.count == 2)
-        #expect(assistantBlocks[0]["type"] as? String == "thinking")
-        #expect(assistantBlocks[0]["signature"] as? String == "sig_anthropic")
-        #expect(assistantBlocks[1]["type"] as? String == "text")
-    }
-
-    @Test func stripUnsignedThinkingBlocksNoOpWhenAllSigned() throws {
-        let body = try JSONSerialization.data(withJSONObject: [
-            "model": "claude-3-opus",
-            "messages": [
-                [
-                    "role": "assistant",
-                    "content": [
-                        ["type": "thinking", "thinking": "thought", "signature": "sig_ok"],
-                        ["type": "text", "text": "done"]
-                    ]
-                ]
-            ]
-        ], options: [.sortedKeys])
-
-        let result = ProxyForwarder.stripUnsignedThinkingBlocks(body)
-        #expect(result.strippedCount == 0)
-        #expect(result.bodyData == body)
-    }
-
-    @Test func stripUnsignedThinkingBlocksFillsEmptyAssistantContent() throws {
-        let body = try JSONSerialization.data(withJSONObject: [
-            "model": "claude-3-opus",
-            "messages": [
-                [
-                    "role": "assistant",
-                    "content": [
-                        ["type": "thinking", "thinking": "only unsigned thinking"]
-                    ]
-                ]
-            ]
-        ], options: [.sortedKeys])
-
-        let result = ProxyForwarder.stripUnsignedThinkingBlocks(body)
-        #expect(result.strippedCount == 1)
-
-        let json = try #require(try JSONSerialization.jsonObject(with: result.bodyData) as? [String: Any])
-        let messages = try #require(json["messages"] as? [[String: Any]])
-        let assistantBlocks = try #require(messages[0]["content"] as? [[String: Any]])
-        #expect(assistantBlocks.count == 1)
-        #expect(assistantBlocks[0]["type"] as? String == "text")
-        #expect(assistantBlocks[0]["text"] as? String == "")
+        let vendorReady = TranscriptProjector.makeVendorReadyMessages(from: messages)
+        let blocks = try #require(vendorReady.first?["content"] as? [[String: Any]])
+        #expect(blocks.count == 2)
+        let thinkingBlock = try #require(blocks.first { $0["type"] as? String == "thinking" })
+        #expect(thinkingBlock["signature"] == nil)
+        #expect(thinkingBlock["thinking"] as? String == "vendor thought")
+        #expect(blocks.contains { $0["type"] as? String == "text" })
+        #expect(!blocks.contains { $0["type"] as? String == "redacted_thinking" })
     }
 }
