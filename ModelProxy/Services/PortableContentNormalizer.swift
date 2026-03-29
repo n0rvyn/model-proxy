@@ -158,9 +158,7 @@ final class PortableSSEStreamNormalizer {
         nextVisibleIndex += 1
         visibleIndexMap[originalIndex] = visibleIndex
         json["index"] = visibleIndex
-        var forwardedBlock = visibleBlock
-        forwardedBlock.removeValue(forKey: "signature")
-        json["content_block"] = forwardedBlock
+        json["content_block"] = visibleBlock
         return try encodeEvent(name: eventName, json: json)
     }
 
@@ -177,7 +175,7 @@ final class PortableSSEStreamNormalizer {
         }
 
         if let deltaType = (delta["type"] as? String)?.lowercased(),
-           deltaType == "signature_delta" {
+           deltaType == "signature_delta" || deltaType.contains("thinking") || deltaType.contains("reasoning") {
             return nil
         }
 

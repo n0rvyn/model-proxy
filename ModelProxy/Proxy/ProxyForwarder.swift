@@ -179,20 +179,14 @@ enum ProxyForwarder {
 
         if target.signingDomain.supportsAnthropicSignedReplay {
             let sanitized = sanitizeAnthropicBodyIfNeeded(preparedRequest.bodyData)
-            let thinkingStripped = stripUnsignedThinkingBlocks(sanitized.bodyData)
             preparedRequest = PreparedRequest(
-                bodyData: thinkingStripped.bodyData,
+                bodyData: sanitized.bodyData,
                 context: preparedRequest.context,
                 projectedPortableMessagesData: preparedRequest.projectedPortableMessagesData
             )
             if sanitized.normalizedToolUseCount > 0 || sanitized.normalizedToolResultCount > 0 {
                 AppLog.proxy.warning(
                     "[Proxy] [\(requestID)] ToolIDGuard: normalized outbound Anthropic transcript tool_use=\(sanitized.normalizedToolUseCount) tool_result=\(sanitized.normalizedToolResultCount)"
-                )
-            }
-            if thinkingStripped.strippedCount > 0 {
-                AppLog.proxy.info(
-                    "[Proxy] [\(requestID)] ThinkingGuard: stripped \(thinkingStripped.strippedCount) unsigned thinking block(s) from Anthropic-bound request"
                 )
             }
         }
@@ -625,60 +619,6 @@ enum ProxyForwarder {
 
     private static func containsJSONStringField(_ data: Data, field: String) -> Bool {
         data.range(of: Data(("\"\(field)\"").utf8)) != nil
-    }
-
-    struct UnsignedThinkingStrippingResult: Sendable, Equatable {
-        let bodyData: Data
-        let strippedCount: Int
-    }
-
-    static func stripUnsignedThinkingBlocks(_ body: Data) -> UnsignedThinkingStrippingResult {
-        guard var json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let messages = json["messages"] as? [[String: Any]] else {
-            return UnsignedThinkingStrippingResult(bodyData: body, strippedCount: 0)
-        }
-
-        var strippedCount = 0
-        var modified = false
-        var newMessages: [[String: Any]] = []
-
-        for var message in messages {
-            guard let blocks = message["content"] as? [[String: Any]] else {
-                newMessages.append(message)
-                continue
-            }
-
-            let filteredBlocks: [[String: Any]] = blocks.compactMap { block in
-                let blockType = (block["type"] as? String)?.lowercased()
-                let isThinkingType = blockType == "thinking" || (blockType?.contains("reasoning") ?? false)
-                guard isThinkingType else { return block }
-
-                // Keep thinking blocks that have a signature (Anthropic-signed).
-                if block["signature"] is String {
-                    return block
-                }
-
-                // Strip unsigned thinking blocks (from third-party vendors).
-                strippedCount += 1
-                modified = true
-                return nil
-            }
-
-            if filteredBlocks.isEmpty, (message["role"] as? String) == "assistant" {
-                message["content"] = [["type": "text", "text": ""]] as [[String: Any]]
-            } else {
-                message["content"] = filteredBlocks
-            }
-            newMessages.append(message)
-        }
-
-        guard modified else {
-            return UnsignedThinkingStrippingResult(bodyData: body, strippedCount: 0)
-        }
-
-        json["messages"] = newMessages
-        let strippedBody = (try? TranscriptProjector.encodeJSONObject(json)) ?? body
-        return UnsignedThinkingStrippingResult(bodyData: strippedBody, strippedCount: strippedCount)
     }
 
     struct RequestStructureSummary: Sendable, Equatable {
