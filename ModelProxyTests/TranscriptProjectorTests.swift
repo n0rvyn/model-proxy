@@ -4,7 +4,7 @@ import Foundation
 
 struct TranscriptProjectorTests {
 
-    @Test func portableRequestStripsReplaySensitiveHistoryButKeepsThinkingConfig() throws {
+    @Test func portableRequestKeepsThinkingContentStripsSignatureAndKeepsThinkingConfig() throws {
         let projector = TranscriptProjector()
         let target = RoutingSnapshot.RouteTarget(
             baseURL: "https://coding.dashscope.aliyuncs.com/apps/anthropic",
@@ -41,8 +41,11 @@ struct TranscriptProjectorTests {
         #expect(thinkingConfig["type"] as? String == "enabled")
 
         let assistantBlocks = try #require(messages.first?["content"] as? [[String: Any]])
-        #expect(assistantBlocks.count == 1)
-        #expect(assistantBlocks.first?["type"] as? String == "text")
+        #expect(assistantBlocks.count == 2)
+        let thinkingBlock = try #require(assistantBlocks.first { $0["type"] as? String == "thinking" })
+        #expect(thinkingBlock["signature"] == nil)
+        #expect(thinkingBlock["thinking"] as? String == "secret")
+        #expect(assistantBlocks.contains { $0["type"] as? String == "text" })
         #expect(prepared.context != nil)
     }
 

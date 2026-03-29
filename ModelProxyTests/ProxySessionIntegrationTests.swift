@@ -41,8 +41,10 @@ struct ProxySessionIntegrationTests {
         let projected = try #require(try JSONSerialization.jsonObject(with: prepared.bodyData) as? [String: Any])
         let projectedMessages = try #require(projected["messages"] as? [[String: Any]])
         let projectedBlocks = try #require(projectedMessages.first?["content"] as? [[String: Any]])
-        #expect(projectedBlocks.count == 1)
-        #expect(projectedBlocks.first?["type"] as? String == "text")
+        #expect(projectedBlocks.count == 2)
+        let projectedThinking = try #require(projectedBlocks.first { $0["type"] as? String == "thinking" })
+        #expect(projectedThinking["signature"] == nil)
+        #expect(projectedThinking["thinking"] as? String == "anthropic signed history")
 
         let qwenResponse = try JSONSerialization.data(withJSONObject: [
             "id": "msg_qwen",
@@ -61,8 +63,10 @@ struct ProxySessionIntegrationTests {
 
         let portableReply = try #require(try JSONSerialization.jsonObject(with: normalized.bodyData) as? [String: Any])
         let portableBlocks = try #require(portableReply["content"] as? [[String: Any]])
-        #expect(portableBlocks.count == 1)
-        #expect(portableBlocks.first?["text"] as? String == "Committed successfully")
+        #expect(portableBlocks.count == 2)
+        let portableThinking = try #require(portableBlocks.first { $0["type"] as? String == "thinking" })
+        #expect(portableThinking["signature"] == nil)
+        #expect(portableBlocks.contains { $0["text"] as? String == "Committed successfully" })
 
         let mainOpusRequest = try JSONSerialization.data(withJSONObject: [
             "model": "claude-opus-4-6",
@@ -74,14 +78,24 @@ struct ProxySessionIntegrationTests {
             ]
         ], options: [.sortedKeys])
 
+        // Before Anthropic guard: unsigned thinking blocks ARE present (from portable vendors).
         let mainJSON = try #require(try JSONSerialization.jsonObject(with: mainOpusRequest) as? [String: Any])
         let mainMessages = try #require(mainJSON["messages"] as? [[String: Any]])
-        let assistantMessages = mainMessages.filter { ($0["role"] as? String) == "assistant" }
-        let allBlocks = try assistantMessages.flatMap { message in
-            try #require(message["content"] as? [[String: Any]])
-        }
-        #expect(!allBlocks.contains { $0["signature"] != nil })
-        #expect(!allBlocks.contains { $0["type"] as? String == "thinking" })
+        let preGuardBlocks = try mainMessages
+            .filter { ($0["role"] as? String) == "assistant" }
+            .flatMap { try #require($0["content"] as? [[String: Any]]) }
+        #expect(preGuardBlocks.contains { $0["type"] as? String == "thinking" })
+        #expect(!preGuardBlocks.contains { $0["signature"] != nil })
+
+        // After Anthropic guard: unsigned thinking stripped.
+        let stripped = ProxyForwarder.stripUnsignedThinkingBlocks(mainOpusRequest)
+        #expect(stripped.strippedCount > 0)
+        let guardedJSON = try #require(try JSONSerialization.jsonObject(with: stripped.bodyData) as? [String: Any])
+        let guardedMessages = try #require(guardedJSON["messages"] as? [[String: Any]])
+        let postGuardBlocks = try guardedMessages
+            .filter { ($0["role"] as? String) == "assistant" }
+            .flatMap { try #require($0["content"] as? [[String: Any]]) }
+        #expect(!postGuardBlocks.contains { $0["type"] as? String == "thinking" })
     }
 
     @Test func codexForkRequestWithoutMessagesStaysTransparent() async throws {
