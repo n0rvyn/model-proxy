@@ -19,13 +19,16 @@ struct TrafficEntry: Identifiable, Sendable {
     let timestamp: Date
     /// Total request duration in seconds; nil for blocked requests (no upstream call).
     let duration: TimeInterval?
+    /// Output tokens from this request; nil when unavailable (blocked, replay, or no usage data).
+    let outputTokens: Int?
 
-    init(model: String, routeType: RouteType, httpStatus: Int, duration: TimeInterval? = nil, timestamp: Date = .now) {
+    init(model: String, routeType: RouteType, httpStatus: Int, duration: TimeInterval? = nil, outputTokens: Int? = nil, timestamp: Date = .now) {
         self.id = UUID()
         self.model = model
         self.routeType = routeType
         self.httpStatus = httpStatus
         self.duration = duration
+        self.outputTokens = outputTokens
         self.timestamp = timestamp
     }
 }

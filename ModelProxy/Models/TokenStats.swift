@@ -19,21 +19,50 @@ struct DailyTokenSnapshot: Codable, Sendable {
     var date: String
     /// Outer key: vendor UUID string. Inner key: model ID string.
     var usageByVendorAndModel: [String: [String: ModelTokenRecord]]
+    /// Token usage keyed by source model name (the model the client requested before mapping).
+    /// Only populated for mapped routes; passthrough routes do not contribute here.
+    var sourceModelUsage: [String: ModelTokenRecord]
 
-    init(date: String, usageByVendorAndModel: [String: [String: ModelTokenRecord]] = [:]) {
+    init(
+        date: String,
+        usageByVendorAndModel: [String: [String: ModelTokenRecord]] = [:],
+        sourceModelUsage: [String: ModelTokenRecord] = [:]
+    ) {
         self.date = date
         self.usageByVendorAndModel = usageByVendorAndModel
+        self.sourceModelUsage = sourceModelUsage
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = try container.decode(String.self, forKey: .date)
+        usageByVendorAndModel = try container.decode([String: [String: ModelTokenRecord]].self, forKey: .usageByVendorAndModel)
+        sourceModelUsage = (try? container.decode([String: ModelTokenRecord].self, forKey: .sourceModelUsage)) ?? [:]
     }
 }
 
 /// In-memory accumulator for token stats. Managed by TokenStatsStore.
 struct TokenStats: Sendable {
-    /// Outer key: vendor UUID. Inner key: model ID.
+    /// Outer key: vendor UUID. Inner key: model ID (target model for mapped routes).
     private(set) var records: [UUID: [String: ModelTokenRecord]] = [:]
+    /// Token usage keyed by source model name (pre-mapping). Only mapped routes contribute.
+    private(set) var sourceModelRecords: [String: ModelTokenRecord] = [:]
 
-    mutating func add(vendorID: UUID, modelID: String, input: Int, output: Int) {
+    mutating func add(vendorID: UUID, modelID: String, input: Int, output: Int, sourceModel: String? = nil) {
         records[vendorID, default: [:]][modelID, default: ModelTokenRecord()].inputTokens += input
         records[vendorID, default: [:]][modelID, default: ModelTokenRecord()].outputTokens += output
+        if let sourceModel {
+            sourceModelRecords[sourceModel, default: ModelTokenRecord()].inputTokens += input
+            sourceModelRecords[sourceModel, default: ModelTokenRecord()].outputTokens += output
+        }
+    }
+
+    /// Restore source model records from a persisted snapshot (no vendor dependency).
+    mutating func restoreSourceModelRecords(_ records: [String: ModelTokenRecord]) {
+        for (model, record) in records {
+            sourceModelRecords[model, default: ModelTokenRecord()].inputTokens += record.inputTokens
+            sourceModelRecords[model, default: ModelTokenRecord()].outputTokens += record.outputTokens
+        }
     }
 
     func totalInputTokens() -> Int {

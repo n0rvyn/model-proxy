@@ -42,6 +42,8 @@ final class AppConfig: Codable {
     /// Global model routing rules, shared across all clients.
     var modelMappings: [ModelMapping]
     var debug: DebugConfig
+    /// User-overridden model pricing ($/1M tokens). Keys are model ID strings.
+    var modelPricingOverrides: [String: ModelPrice]
 
     // MARK: - Init
 
@@ -49,12 +51,14 @@ final class AppConfig: Codable {
         vendors: [Vendor] = [],
         clients: [ClientConfig] = [],
         modelMappings: [ModelMapping] = [],
-        debug: DebugConfig = DebugConfig()
+        debug: DebugConfig = DebugConfig(),
+        modelPricingOverrides: [String: ModelPrice] = [:]
     ) {
         self.vendors = vendors
         self.clients = clients
         self.modelMappings = modelMappings
         self.debug = debug
+        self.modelPricingOverrides = modelPricingOverrides
     }
 
     // MARK: - Codable
@@ -64,6 +68,7 @@ final class AppConfig: Codable {
         case clients
         case modelMappings
         case debug
+        case modelPricingOverrides
     }
 
     required init(from decoder: Decoder) throws {
@@ -72,6 +77,7 @@ final class AppConfig: Codable {
         clients = try container.decode([ClientConfig].self, forKey: .clients)
         modelMappings = (try? container.decode([ModelMapping].self, forKey: .modelMappings)) ?? []
         debug = (try? container.decode(DebugConfig.self, forKey: .debug)) ?? DebugConfig()
+        modelPricingOverrides = (try? container.decode([String: ModelPrice].self, forKey: .modelPricingOverrides)) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -80,6 +86,9 @@ final class AppConfig: Codable {
         try container.encode(clients, forKey: .clients)
         try container.encode(modelMappings, forKey: .modelMappings)
         try container.encode(debug, forKey: .debug)
+        if !modelPricingOverrides.isEmpty {
+            try container.encode(modelPricingOverrides, forKey: .modelPricingOverrides)
+        }
     }
 }
 
