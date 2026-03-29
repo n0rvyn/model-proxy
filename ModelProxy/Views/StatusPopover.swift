@@ -39,7 +39,7 @@ struct StatusPopover: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
         }
-        .frame(width: 360)
+        .frame(width: 400)
         .onAppear {
             if configStore.didResetFromCorrupt {
                 showingCorruptAlert = true
@@ -150,7 +150,7 @@ struct StatusPopover: View {
             } else {
                 HStack(spacing: 0) {
                     VStack(spacing: 1) {
-                        Text("↓ \(input.formatted())")
+                        Text("↓ \(input.compactTokenString)")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                         Text("input")
@@ -162,7 +162,7 @@ struct StatusPopover: View {
                     Divider().frame(height: 28)
 
                     VStack(spacing: 1) {
-                        Text("↑ \(output.formatted())")
+                        Text("↑ \(output.compactTokenString)")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                         Text("output")
@@ -174,7 +174,7 @@ struct StatusPopover: View {
                     Divider().frame(height: 28)
 
                     VStack(spacing: 1) {
-                        Text(total.formatted())
+                        Text(total.compactTokenString)
                             .font(.caption2.monospacedDigit())
                             .fontWeight(.medium)
                         Text("total")
@@ -192,7 +192,7 @@ struct StatusPopover: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(total == 0
             ? "Today: no tokens"
-            : "Today: \(total.formatted()) tokens, \(input.formatted()) input, \(output.formatted()) output"
+            : "Today: \(total.compactTokenString) tokens, \(input.compactTokenString) input, \(output.compactTokenString) output"
         )
     }
 
@@ -301,9 +301,19 @@ struct StatusPopover: View {
     @ViewBuilder
     private var trafficSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Recent Requests")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text("Recent Requests")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Time")
+                    .frame(width: 30, alignment: .trailing)
+                Text("t/s")
+                    .frame(width: 26, alignment: .trailing)
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 4)
 
             if trafficLog.entries.isEmpty {
                 Text("No requests yet")
@@ -363,14 +373,19 @@ private struct TrafficRowView: View {
                 .frame(width: 28, alignment: .trailing)
 
             Text(durationText)
-                .font(.caption2)
+                .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
-                .frame(width: 44, alignment: .trailing)
+                .frame(width: 30, alignment: .trailing)
+
+            Text(tpsText)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 26, alignment: .trailing)
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 3)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(entry.model), \(routeLabel), HTTP \(entry.httpStatus), \(durationText)")
+        .accessibilityLabel("\(entry.model), \(routeLabel), HTTP \(entry.httpStatus), \(durationText), \(tpsText) t/s")
     }
 
     private var statusColor: Color {
@@ -387,6 +402,12 @@ private struct TrafficRowView: View {
         case .mapped(let targetModel): return targetModel
         case .blocked: return "blocked"
         }
+    }
+
+    private var tpsText: String {
+        guard let tokens = entry.outputTokens, tokens > 0,
+              let d = entry.duration, d > 0 else { return "—" }
+        return "\(Int(Double(tokens) / d))"
     }
 
     private var durationText: String {
@@ -410,7 +431,7 @@ private struct TrafficRowView: View {
         .environment(ProxyServer(tokenStatsStore: store))
         .environment({
             let log = TrafficLog()
-            log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .mapped(targetModel: "qwen-plus"), httpStatus: 200, duration: 12.3))
+            log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .mapped(targetModel: "qwen-plus"), httpStatus: 200, duration: 12.3, outputTokens: 520))
             log.append(TrafficEntry(model: "claude-sonnet-4-6", routeType: .passthrough, httpStatus: 200))
             log.append(TrafficEntry(model: "gpt-4o", routeType: .blocked, httpStatus: 403))
             return log

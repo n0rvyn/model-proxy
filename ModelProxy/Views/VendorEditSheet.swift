@@ -17,6 +17,8 @@ struct VendorEditSheet: View {
     @State private var readTimeoutSeconds: Int = 120
     @State private var compatibleClientID: UUID?
     @State private var supportedModels: [String] = [""]
+    @State private var modelInputPrices: [Int: String] = [:]
+    @State private var modelOutputPrices: [Int: String] = [:]
     @State private var signingDomain: SigningDomain = .compatibleThirdParty
     @State private var replayPolicy: TranscriptReplayPolicy = .portableOnly
 
@@ -65,7 +67,20 @@ struct VendorEditSheet: View {
                     }
                 }
 
-                Section("Supported Models") {
+                Section {
+                    // Column headers
+                    HStack {
+                        Text("Model")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("In $/M")
+                            .frame(width: 46, alignment: .trailing)
+                        Text("Out $/M")
+                            .frame(width: 46, alignment: .trailing)
+                        Color.clear.frame(width: 24)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+
                     ForEach(Array(supportedModels.indices), id: \.self) { index in
                         HStack {
                             TextField("Model name", text: Binding(
@@ -74,12 +89,39 @@ struct VendorEditSheet: View {
                             ))
                             .autocorrectionDisabled()
 
+                            TextField(
+                                modelPricePlaceholder(for: index, isInput: true),
+                                text: Binding(
+                                    get: { modelInputPrices[index] ?? "" },
+                                    set: { modelInputPrices[index] = $0 }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 46)
+                            .multilineTextAlignment(.trailing)
+                            .font(.caption.monospacedDigit())
+                            .labelsHidden()
+
+                            TextField(
+                                modelPricePlaceholder(for: index, isOutput: true),
+                                text: Binding(
+                                    get: { modelOutputPrices[index] ?? "" },
+                                    set: { modelOutputPrices[index] = $0 }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 46)
+                            .multilineTextAlignment(.trailing)
+                            .font(.caption.monospacedDigit())
+                            .labelsHidden()
+
                             Button {
                                 removeSupportedModel(at: index)
                             } label: {
-                                Image(systemName: "minus.circle")
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red.opacity(0.7))
                             }
-                            .buttonStyle(.mpDestructive)
+                            .buttonStyle(.borderless)
                             .accessibilityLabel("Remove Supported Model")
                         }
                     }
@@ -91,6 +133,8 @@ struct VendorEditSheet: View {
                     }
                     .buttonStyle(.mpInline)
                     .accessibilityLabel("Add Supported Model")
+                } header: {
+                    Text("Supported Models")
                 }
 
                 Section("Timeouts (seconds)") {
@@ -134,6 +178,7 @@ struct VendorEditSheet: View {
                 readTimeoutSeconds = vendor.readTimeoutSeconds
                 compatibleClientID = vendor.compatibleClientID
                 supportedModels = vendor.supportedModels.isEmpty ? [""] : vendor.supportedModels
+                initializeModelPrices()
                 signingDomain = vendor.signingDomain
                 replayPolicy = vendor.replayPolicy
             }
@@ -167,7 +212,50 @@ struct VendorEditSheet: View {
             )
             configStore.config.vendors.append(v)
         }
+        commitModelPrices()
         configStore.saveAndReload(proxyServer: proxyServer)
+    }
+
+    private func modelPricePlaceholder(for index: Int, isInput: Bool = false, isOutput: Bool = false) -> String {
+        let modelName = supportedModels[index].trimmingCharacters(in: .whitespaces)
+        guard !modelName.isEmpty else { return isInput ? "In" : "Out" }
+        guard let builtIn = ModelPrice.builtInDefaults
+            .filter({ modelName.hasPrefix($0.prefix) })
+            .max(by: { $0.prefix.count < $1.prefix.count })?
+            .price else { return isInput ? "In" : "Out" }
+        return String(format: "%.2f", isInput ? builtIn.inputPerMillion : builtIn.outputPerMillion)
+    }
+
+    private func initializeModelPrices() {
+        let overrides = configStore.config.modelPricingOverrides
+        for (index, modelName) in supportedModels.enumerated() {
+            let trimmed = modelName.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            if let price = overrides[trimmed] {
+                modelInputPrices[index] = String(format: "%.2f", price.inputPerMillion)
+                modelOutputPrices[index] = String(format: "%.2f", price.outputPerMillion)
+            }
+        }
+    }
+
+    private func commitModelPrices() {
+        for (index, modelName) in normalizedSupportedModels().enumerated() {
+            guard let inputStr = modelInputPrices[index], let inputVal = Double(inputStr),
+                  let outputStr = modelOutputPrices[index], let outputVal = Double(outputStr) else {
+                continue
+            }
+            let price = ModelPrice(inputPerMillion: inputVal, outputPerMillion: outputVal)
+            // Skip if it matches built-in default exactly.
+            let builtIn = ModelPrice.builtInDefaults
+                .filter { modelName.hasPrefix($0.prefix) }
+                .max { $0.prefix.count < $1.prefix.count }?
+                .price
+            if price == builtIn {
+                configStore.config.modelPricingOverrides.removeValue(forKey: modelName)
+            } else {
+                configStore.config.modelPricingOverrides[modelName] = price
+            }
+        }
     }
 
     private func removeSupportedModel(at index: Int) {
