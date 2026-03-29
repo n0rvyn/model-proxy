@@ -154,12 +154,11 @@ struct TranscriptProjector: TranscriptProjecting {
     }
 
     nonisolated static func isNonPortableBlock(_ block: [String: Any]) -> Bool {
-        if block["signature"] != nil { return true }
-        if block["thinking"] != nil || block["redacted_thinking"] != nil { return true }
         if let type = (block["type"] as? String)?.lowercased(),
-           type == "thinking" || type == "redacted_thinking" || type.contains("reasoning") {
+           type == "redacted_thinking" {
             return true
         }
+        if block["redacted_thinking"] != nil { return true }
         return false
     }
 
