@@ -227,10 +227,18 @@ enum ProxyForwarder {
             ? .passthrough
             : .mapped(targetModel: usedTarget.targetModel ?? model)
 
-        let onUsage: ResponseRelay.UsageCallback? = usedTarget.vendorID.map { vendorID in
-            { [tokenStatsStore] input, output in
+        // Capture output tokens for TPS display in traffic log.
+        // Safe: callback fires during `await relay()` below, read happens after relay returns.
+        nonisolated(unsafe) var capturedOutputTokens: Int?
+
+        let sourceModelForStats: String? = usedTarget.isPassthrough ? nil : model
+
+        let vendorID = usedTarget.vendorID
+        let onUsage: ResponseRelay.UsageCallback = { [tokenStatsStore] input, output in
+            capturedOutputTokens = output
+            if let vendorID {
                 Task { @MainActor in
-                    tokenStatsStore.add(vendorID: vendorID, model: statsModel, input: input, output: output)
+                    tokenStatsStore.add(vendorID: vendorID, model: statsModel, input: input, output: output, sourceModel: sourceModelForStats)
                 }
             }
         }
@@ -260,7 +268,7 @@ enum ProxyForwarder {
 
         // 9. Publish traffic event with actual upstream status code.
         let duration = Date.now.timeIntervalSince(startTime)
-        let entry = TrafficEntry(model: model, routeType: entryRouteType, httpStatus: statusCode, duration: duration)
+        let entry = TrafficEntry(model: model, routeType: entryRouteType, httpStatus: statusCode, duration: duration, outputTokens: capturedOutputTokens)
         await MainActor.run { trafficLog.append(entry) }
     }
 

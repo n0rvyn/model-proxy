@@ -45,13 +45,13 @@ final class TokenStatsStore {
 
     /// Called from ProxyForwarder after a successful response with usage data.
     /// Resets the accumulator if the calendar date has rolled over since last write.
-    func add(vendorID: UUID, model: String, input: Int, output: Int) {
+    func add(vendorID: UUID, model: String, input: Int, output: Int, sourceModel: String? = nil) {
         let today = Self.todayString()
         if today != statsDate {
             statsDate = today
             stats = TokenStats()
         }
-        stats.add(vendorID: vendorID, modelID: model, input: input, output: output)
+        stats.add(vendorID: vendorID, modelID: model, input: input, output: output, sourceModel: sourceModel)
         persistAsync()
     }
 
@@ -78,7 +78,8 @@ final class TokenStatsStore {
             date: statsDate,
             usageByVendorAndModel: stats.records.reduce(into: [:]) { result, pair in
                 result[pair.key.uuidString] = pair.value
-            }
+            },
+            sourceModelUsage: stats.sourceModelRecords
         )
         let fileURL = Self.fileURL(for: statsDate)
         Task.detached(priority: .background) {
@@ -116,6 +117,7 @@ final class TokenStatsStore {
                 )
             }
         }
+        result.restoreSourceModelRecords(snapshot.sourceModelUsage)
         return result
     }
 }
