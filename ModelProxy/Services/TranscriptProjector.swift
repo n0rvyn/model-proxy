@@ -41,6 +41,8 @@ struct TranscriptProjector: TranscriptProjecting {
             fingerprint.sha256Hex((try? Self.encodeJSONObject(message)) ?? Data())
         }
 
+        let vendorReadyMessages = Self.makeVendorReadyMessages(from: originalMessages)
+
         let vendorKey = Self.vendorKey(for: target)
         let matchedBranch = Self.bestMatchingBranch(
             for: portableMessageHashes,
@@ -56,14 +58,14 @@ struct TranscriptProjector: TranscriptProjecting {
 
         if let matchedBranch,
            let branchFullMessages = try? Self.decodeMessagesData(matchedBranch.fullMessagesData) {
-            let suffix = Array(portableMessages.dropFirst(matchedBranch.portableMessageHashes.count))
+            let suffix = Array(vendorReadyMessages.dropFirst(matchedBranch.portableMessageHashes.count))
             fullMessages = branchFullMessages + suffix
             lineageKey = matchedBranch.lineageKey
             branchKey = matchedBranch.branchKey
             reusedBranchHistory = true
             reusedPortableMessageCount = matchedBranch.portableMessageHashes.count
         } else {
-            fullMessages = portableMessages
+            fullMessages = vendorReadyMessages
             lineageKey = fingerprint.sha256Hex(portableMessagesData)
             branchKey = fingerprint.sha256Hex(Data("\(lineageKey)|\(vendorKey)".utf8))
             reusedBranchHistory = false
@@ -138,6 +140,50 @@ struct TranscriptProjector: TranscriptProjecting {
         return portableMessage
     }
 
+    nonisolated static func makeVendorReadyMessages(from messages: [[String: Any]]) -> [[String: Any]] {
+        let normalized = ToolUseIDNormalizer.normalizeMessages(messages)
+        return normalized.messages.compactMap(makeVendorReadyMessage(from:))
+    }
+
+    nonisolated static func makeVendorReadyMessage(from message: [String: Any]) -> [String: Any]? {
+        let normalizedMessage = ToolUseIDNormalizer.normalizeMessage(message)
+        guard let content = normalizedMessage["content"] else {
+            return normalizedMessage
+        }
+        guard let blocks = content as? [Any] else {
+            return normalizedMessage
+        }
+
+        var vendorMessage = normalizedMessage
+        let vendorBlocks = makeVendorReadyBlocks(from: blocks)
+
+        if let role = normalizedMessage["role"] as? String, role == "assistant", vendorBlocks.isEmpty {
+            vendorMessage["content"] = [["type": "text", "text": ""]]
+        } else {
+            vendorMessage["content"] = vendorBlocks
+        }
+        return vendorMessage
+    }
+
+    nonisolated static func makeVendorReadyBlocks(from blocks: [Any]) -> [Any] {
+        blocks.compactMap { block in
+            guard let dictionary = block as? [String: Any] else {
+                return block
+            }
+            // Drop redacted_thinking entirely (Anthropic-specific, no useful content).
+            if let type = (dictionary["type"] as? String)?.lowercased(),
+               type == "redacted_thinking" {
+                return nil
+            }
+            if dictionary["redacted_thinking"] != nil { return nil }
+
+            // Keep all other blocks (including thinking), strip only the signature field.
+            var sanitized = dictionary
+            sanitized.removeValue(forKey: "signature")
+            return sanitized
+        }
+    }
+
     nonisolated static func makePortableBlocks(from blocks: [Any]) -> [Any] {
         blocks.compactMap { block in
             guard let dictionary = block as? [String: Any] else {
@@ -154,11 +200,12 @@ struct TranscriptProjector: TranscriptProjecting {
     }
 
     nonisolated static func isNonPortableBlock(_ block: [String: Any]) -> Bool {
+        if block["signature"] != nil { return true }
+        if block["thinking"] != nil || block["redacted_thinking"] != nil { return true }
         if let type = (block["type"] as? String)?.lowercased(),
-           type == "redacted_thinking" {
+           type == "thinking" || type == "redacted_thinking" || type.contains("reasoning") {
             return true
         }
-        if block["redacted_thinking"] != nil { return true }
         return false
     }
 
