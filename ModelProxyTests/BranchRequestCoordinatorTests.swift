@@ -119,6 +119,31 @@ struct BranchRequestCoordinatorTests {
         await coordinator.complete(lease: codexLease, replay: nil)
     }
 
+    @Test func samePortableHashesFromDifferentSessionScopesDoNotBlockEachOther() async throws {
+        let coordinator = BranchRequestCoordinator()
+        let sessionAContext = makeContext(sessionScopeKey: "session-a", hashes: ["m1", "m2"])
+        let sessionBContext = makeContext(sessionScopeKey: "session-b", hashes: ["m1", "m2"])
+
+        let firstDecision = await coordinator.acquire(context: sessionAContext)
+        let firstLease = switch firstDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected first lease acquisition"); throw TestAbort()
+        }
+
+        let secondDecision = await coordinator.acquire(context: sessionBContext)
+        let secondLease = switch secondDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected second lease acquisition"); throw TestAbort()
+        }
+
+        #expect(firstLease.sessionScopeKey == "session-a")
+        #expect(secondLease.sessionScopeKey == "session-b")
+        #expect(secondLease.generation == 1)
+
+        await coordinator.complete(lease: firstLease, replay: nil)
+        await coordinator.complete(lease: secondLease, replay: nil)
+    }
+
     @Test func replayResponseHeadersCanBeAssertedWithoutOrderSensitivity() async throws {
         let coordinator = BranchRequestCoordinator()
         let context = makeContext(hashes: ["m1"])
@@ -155,11 +180,16 @@ struct BranchRequestCoordinatorTests {
     }
 }
 
-private func makeContext(clientName: String = "Claude Code", hashes: [String]) -> PreparedBranchContext {
+private func makeContext(
+    clientName: String = "Claude Code",
+    sessionScopeKey: String? = nil,
+    hashes: [String]
+) -> PreparedBranchContext {
     PreparedBranchContext(
         lineageKey: "lineage-1",
         branchKey: "branch-1",
         clientName: clientName,
+        sessionScopeKey: sessionScopeKey,
         vendorKey: "vendor-qwen",
         signingDomain: .compatibleThirdParty,
         replayPolicy: .portableOnly,

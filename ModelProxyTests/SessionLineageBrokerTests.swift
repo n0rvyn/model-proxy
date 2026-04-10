@@ -109,7 +109,77 @@ struct SessionLineageBrokerTests {
         )
 
         #expect(await broker.branches(for: "Claude Code").count == 1)
+        #expect(await broker.branches(for: "Claude Code", sessionScopeKey: nil).count == 1)
         #expect(await broker.branches(for: "Codex").isEmpty)
+    }
+
+    @Test func brokerScopesBranchReuseBySessionScopeKey() async throws {
+        let broker = makeBroker()
+        let target = RoutingSnapshot.RouteTarget(
+            baseURL: "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+            apiKey: "key",
+            vendorName: "Qwen",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000B2"),
+            targetModel: "qwen3.5-plus",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly
+        )
+
+        let firstRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-haiku-4-5-20251001",
+            "messages": [["role": "user", "content": "Task"]]
+        ], options: [.sortedKeys])
+
+        let prepared = try await broker.prepareRequest(
+            bodyData: firstRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: "session-a",
+            target: target
+        )
+        let context = try #require(prepared.context)
+        try await broker.commitResponse(
+            context: context,
+            assistantTurn: PortableAssistantTurn(
+                fullMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [["type": "text", "text": "done"]]
+                ], options: [.sortedKeys]),
+                portableMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [["type": "text", "text": "done"]]
+                ], options: [.sortedKeys])
+            )
+        )
+
+        let successorRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-haiku-4-5-20251001",
+            "messages": [
+                ["role": "user", "content": "Task"],
+                ["role": "assistant", "content": [["type": "text", "text": "done"]]],
+                ["role": "user", "content": "Next"]
+            ]
+        ], options: [.sortedKeys])
+
+        let sameSessionPrepared = try await broker.prepareRequest(
+            bodyData: successorRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: "session-a",
+            target: target
+        )
+        let otherSessionPrepared = try await broker.prepareRequest(
+            bodyData: successorRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: "session-b",
+            target: target
+        )
+
+        #expect(await broker.branches(for: "Claude Code", sessionScopeKey: "session-a").count == 1)
+        #expect(await broker.branches(for: "Claude Code", sessionScopeKey: "session-b").isEmpty)
+        #expect(sameSessionPrepared.context?.reusedBranchHistory == true)
+        #expect(otherSessionPrepared.context?.reusedBranchHistory == false)
     }
 
     @Test func brokerReusesBranchAfterSSECommitWithoutContentBlockStop() async throws {
