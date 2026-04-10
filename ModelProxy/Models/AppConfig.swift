@@ -44,6 +44,7 @@ final class AppConfig: Codable {
     var debug: DebugConfig
     /// User-overridden model pricing ($/1M tokens). Keys are model ID strings.
     var modelPricingOverrides: [String: ModelPrice]
+    var webSearch: WebSearchConfig
 
     // MARK: - Init
 
@@ -52,13 +53,15 @@ final class AppConfig: Codable {
         clients: [ClientConfig] = [],
         modelMappings: [ModelMapping] = [],
         debug: DebugConfig = DebugConfig(),
-        modelPricingOverrides: [String: ModelPrice] = [:]
+        modelPricingOverrides: [String: ModelPrice] = [:],
+        webSearch: WebSearchConfig = WebSearchConfig()
     ) {
         self.vendors = vendors
         self.clients = clients
         self.modelMappings = modelMappings
         self.debug = debug
         self.modelPricingOverrides = modelPricingOverrides
+        self.webSearch = webSearch
     }
 
     // MARK: - Codable
@@ -69,6 +72,7 @@ final class AppConfig: Codable {
         case modelMappings
         case debug
         case modelPricingOverrides
+        case webSearch
     }
 
     required init(from decoder: Decoder) throws {
@@ -78,6 +82,7 @@ final class AppConfig: Codable {
         modelMappings = (try? container.decode([ModelMapping].self, forKey: .modelMappings)) ?? []
         debug = (try? container.decode(DebugConfig.self, forKey: .debug)) ?? DebugConfig()
         modelPricingOverrides = (try? container.decode([String: ModelPrice].self, forKey: .modelPricingOverrides)) ?? [:]
+        webSearch = (try? container.decode(WebSearchConfig.self, forKey: .webSearch)) ?? WebSearchConfig()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -89,6 +94,7 @@ final class AppConfig: Codable {
         if !modelPricingOverrides.isEmpty {
             try container.encode(modelPricingOverrides, forKey: .modelPricingOverrides)
         }
+        try container.encode(webSearch, forKey: .webSearch)
     }
 }
 
