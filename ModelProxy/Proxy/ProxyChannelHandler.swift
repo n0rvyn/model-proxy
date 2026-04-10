@@ -19,6 +19,8 @@ final class ProxyChannelHandler: ChannelInboundHandler, @unchecked Sendable {
     private let lineageBroker: any SessionLineageBrokering
     private let portableNormalizer: any PortableContentNormalizing
     private let requestCoordinator: any BranchRequestCoordinating
+    private let webSearchProvider: (any WebSearchBridgeProviding)?
+    private let webSearchForwardAsIs: Bool
 
     // Accumulated state for the current request.
     private var requestHead: HTTPRequestHead?
@@ -32,7 +34,9 @@ final class ProxyChannelHandler: ChannelInboundHandler, @unchecked Sendable {
         tokenStatsStore: TokenStatsStore,
         lineageBroker: any SessionLineageBrokering,
         portableNormalizer: any PortableContentNormalizing,
-        requestCoordinator: any BranchRequestCoordinating
+        requestCoordinator: any BranchRequestCoordinating,
+        webSearchProvider: (any WebSearchBridgeProviding)?,
+        webSearchForwardAsIs: Bool
     ) {
         self.clientName = clientName
         self.router = router
@@ -42,6 +46,8 @@ final class ProxyChannelHandler: ChannelInboundHandler, @unchecked Sendable {
         self.lineageBroker = lineageBroker
         self.portableNormalizer = portableNormalizer
         self.requestCoordinator = requestCoordinator
+        self.webSearchProvider = webSearchProvider
+        self.webSearchForwardAsIs = webSearchForwardAsIs
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -74,6 +80,8 @@ final class ProxyChannelHandler: ChannelInboundHandler, @unchecked Sendable {
             let lineageBroker = self.lineageBroker
             let portableNormalizer = self.portableNormalizer
             let requestCoordinator = self.requestCoordinator
+            let webSearchProvider = self.webSearchProvider
+            let webSearchForwardAsIs = self.webSearchForwardAsIs
 
             Task {
                 await ProxyForwarder.forward(
@@ -87,7 +95,9 @@ final class ProxyChannelHandler: ChannelInboundHandler, @unchecked Sendable {
                     tokenStatsStore: tokenStatsStore,
                     lineageBroker: lineageBroker,
                     portableNormalizer: portableNormalizer,
-                    requestCoordinator: requestCoordinator
+                    requestCoordinator: requestCoordinator,
+                    webSearchProvider: webSearchProvider,
+                    webSearchForwardAsIs: webSearchForwardAsIs
                 )
             }
 

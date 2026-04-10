@@ -28,6 +28,8 @@ final class ProxyServer {
     private let lineageBroker: any SessionLineageBrokering
     private let portableNormalizer: any PortableContentNormalizing
     private let requestCoordinator: any BranchRequestCoordinating
+    private(set) var webSearchProvider: (any WebSearchBridgeProviding)?
+    private(set) var webSearchForwardAsIs: Bool = false
 
     // MARK: - Init
 
@@ -73,6 +75,8 @@ final class ProxyServer {
         )
         let client = HTTPClient(eventLoopGroupProvider: .shared(group), configuration: clientConfig)
         self.httpClient = client
+        self.webSearchProvider = WebSearchProviderFactory.make(from: config.webSearch)
+        self.webSearchForwardAsIs = config.webSearch.provider == .forwardAsIs
 
         var slots: [ListenerSlot] = []
         var errors: [String] = []
@@ -98,7 +102,9 @@ final class ProxyServer {
                                 tokenStatsStore: tokenStatsStore,
                                 lineageBroker: self.lineageBroker,
                                 portableNormalizer: self.portableNormalizer,
-                                requestCoordinator: self.requestCoordinator
+                                requestCoordinator: self.requestCoordinator,
+                                webSearchProvider: self.webSearchProvider,
+                                webSearchForwardAsIs: self.webSearchForwardAsIs
                             )
                         )
                     }
@@ -173,6 +179,8 @@ final class ProxyServer {
     /// Push a new routing snapshot to all listeners that match by clientName.
     /// Called after ConfigStore.save(); does not restart any channel.
     func updateRouting(config: AppConfig) {
+        self.webSearchProvider = WebSearchProviderFactory.make(from: config.webSearch)
+        self.webSearchForwardAsIs = config.webSearch.provider == .forwardAsIs
         for slot in listeners {
             guard let clientCfg = config.clients.first(where: { $0.clientName == slot.clientName }) else {
                 continue

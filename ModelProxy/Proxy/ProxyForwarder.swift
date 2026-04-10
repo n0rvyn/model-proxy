@@ -34,10 +34,18 @@ enum ProxyForwarder {
         tokenStatsStore: TokenStatsStore,
         lineageBroker: any SessionLineageBrokering,
         portableNormalizer: any PortableContentNormalizing,
-        requestCoordinator: any BranchRequestCoordinating
+        requestCoordinator: any BranchRequestCoordinating,
+        webSearchProvider: (any WebSearchBridgeProviding)?,
+        webSearchForwardAsIs: Bool = false
     ) async {
         let requestID = String(UUID().uuidString.prefix(8))
         let startTime = Date.now
+        let requestKind = requestKind(for: head.uri)
+        let sessionScopeKey = requestSessionScopeKey(
+            bodyData: body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data(),
+            clientName: clientName,
+            channel: channel
+        )
 
         // 1. Extract original API key (support both x-api-key and Authorization: Bearer).
         let originalAPIKey = Self.extractAPIKey(from: head.headers)
@@ -59,7 +67,12 @@ enum ProxyForwarder {
             target = t
         case .blocked(let reason):
             AppLog.proxy.info("[Proxy] [\(requestID)] \(head.method.rawValue) \(head.uri) model=\(model) BLOCKED")
-            let blockedEntry = TrafficEntry(model: model, routeType: .blocked, httpStatus: 403)
+            let blockedEntry = TrafficEntry(
+                model: model,
+                routeType: .blocked,
+                requestKind: .blocked,
+                httpStatus: 403
+            )
             await MainActor.run { trafficLog.append(blockedEntry) }
             await Self.sendError(channel: channel, status: .forbidden, message: reason)
             return
@@ -90,6 +103,7 @@ enum ProxyForwarder {
             initialPreparedRequest = try await lineageBroker.prepareRequest(
                 bodyData: originalBodyData,
                 clientName: clientName,
+                sessionScopeKey: sessionScopeKey,
                 target: target
             )
         } catch {
@@ -134,6 +148,7 @@ enum ProxyForwarder {
                 let entry = TrafficEntry(
                     model: model,
                     routeType: entryRouteType,
+                    requestKind: requestKind,
                     httpStatus: cachedResponse.statusCode,
                     duration: duration
                 )
@@ -158,6 +173,7 @@ enum ProxyForwarder {
                     preparedRequest = try await lineageBroker.prepareRequest(
                         bodyData: originalBodyData,
                         clientName: clientName,
+                        sessionScopeKey: sessionScopeKey,
                         target: target
                     )
                 } catch {
@@ -191,10 +207,129 @@ enum ProxyForwarder {
             }
         }
 
+        if let webSearchProvider,
+           WebSearchBridge.shouldHandle(
+            bodyData: preparedRequest.bodyData,
+            target: target,
+            requestKind: requestKind
+        ) {
+            nonisolated(unsafe) var lastBridgeTarget: RoutingSnapshot.RouteTarget?
+            do {
+                let bridgeResult = try await WebSearchBridge.execute(
+                    bodyData: preparedRequest.bodyData,
+                    httpClient: httpClient,
+                    portableNormalizer: portableNormalizer,
+                    provider: webSearchProvider,
+                    performModelTurn: { turnBodyData in
+                        let (bridgeResponse, usedBridgeTarget) = await Self.executeWithFailover(
+                            head: head,
+                            bodyData: turnBodyData,
+                            primaryTarget: target,
+                            model: model,
+                            router: router,
+                            httpClient: httpClient,
+                            routeState: &routeState,
+                            requestID: requestID
+                        )
+                        guard let bridgeResponse, let usedBridgeTarget else {
+                            throw WebSearchBridgeError.upstreamFailure(statusCode: 502, bodyPreview: "Upstream unreachable")
+                        }
+                        lastBridgeTarget = usedBridgeTarget
+                        return WebSearchBridge.ModelResponse(
+                            statusCode: Int(bridgeResponse.status.code),
+                            headers: bridgeResponse.headers.map { ($0.name, $0.value) },
+                            bodyData: try await Self.collectResponseBody(bridgeResponse)
+                        )
+                    }
+                )
+                await router.updateRouteState(model: model, state: routeState)
+
+                let usedTarget = lastBridgeTarget ?? target
+                let statsModel = usedTarget.targetModel ?? model
+                let entryRouteType: TrafficEntry.RouteType = usedTarget.isPassthrough
+                    ? .passthrough
+                    : .mapped(targetModel: usedTarget.targetModel ?? model)
+                let sourceModelForStats: String? = usedTarget.isPassthrough ? nil : model
+                if let vendorID = usedTarget.vendorID {
+                    await MainActor.run {
+                        tokenStatsStore.add(
+                            vendorID: vendorID,
+                            model: statsModel,
+                            input: bridgeResult.inputTokens,
+                            output: bridgeResult.outputTokens,
+                            sourceModel: sourceModelForStats
+                        )
+                    }
+                }
+
+                AppLog.proxy.debug(
+                    "[Proxy] [\(requestID)] Response: 200 OK model=\(model) vendor=\(usedTarget.vendorName) bridge=web_search"
+                )
+                await ResponseRelay.replay(
+                    cachedResponse: bridgeResult.clientResponse,
+                    to: channel,
+                    requestID: requestID
+                )
+                if let branchContext = preparedRequest.context,
+                   let branchLease,
+                   let assistantTurn = bridgeResult.assistantTurn {
+                    await Self.commitBridgeAssistantTurnIfCurrent(
+                        assistantTurn,
+                        branchContext: branchContext,
+                        branchLease: branchLease,
+                        lineageBroker: lineageBroker,
+                        requestCoordinator: requestCoordinator,
+                        requestID: requestID
+                    )
+                    await requestCoordinator.complete(lease: branchLease, replay: bridgeResult.clientResponse)
+                } else if let branchLease {
+                    await requestCoordinator.complete(lease: branchLease, replay: bridgeResult.clientResponse)
+                }
+
+                let duration = Date.now.timeIntervalSince(startTime)
+                let entry = TrafficEntry(
+                    model: model,
+                    routeType: entryRouteType,
+                    requestKind: requestKind,
+                    httpStatus: 200,
+                    duration: duration,
+                    outputTokens: bridgeResult.outputTokens
+                )
+                await MainActor.run { trafficLog.append(entry) }
+                return
+            } catch {
+                await router.updateRouteState(model: model, state: routeState)
+                if let branchLease {
+                    await requestCoordinator.complete(lease: branchLease, replay: nil)
+                }
+                AppLog.proxy.error("[Proxy] [\(requestID)] WebSearch bridge failed: \(String(describing: error))")
+                let duration = Date.now.timeIntervalSince(startTime)
+                let entryRouteType: TrafficEntry.RouteType = target.isPassthrough
+                    ? .passthrough
+                    : .mapped(targetModel: target.targetModel ?? model)
+                let entry = TrafficEntry(
+                    model: model,
+                    routeType: entryRouteType,
+                    requestKind: requestKind,
+                    httpStatus: 502,
+                    duration: duration
+                )
+                await MainActor.run { trafficLog.append(entry) }
+                await Self.sendError(channel: channel, status: .badGateway, message: "WebSearch bridge failed: \(error)")
+                return
+            }
+        }
+
+        // 3b. Strip server-side tools that the vendor cannot handle when no bridge is configured.
+        var forwardBodyData = preparedRequest.bodyData
+        if webSearchProvider == nil, !webSearchForwardAsIs, !target.isPassthrough {
+            forwardBodyData = Self.stripServerSideTools(from: forwardBodyData)
+        }
+
         // 4. Build and send upstream request.
         let (upstreamResponse, usedTarget) = await Self.executeWithFailover(
             head: head,
-            bodyData: preparedRequest.bodyData,
+            bodyData: forwardBodyData,
             primaryTarget: target,
             model: model,
             router: router,
@@ -215,7 +350,13 @@ enum ProxyForwarder {
             let entryRouteType: TrafficEntry.RouteType = target.isPassthrough
                 ? .passthrough
                 : .mapped(targetModel: target.targetModel ?? model)
-            let entry = TrafficEntry(model: model, routeType: entryRouteType, httpStatus: 502, duration: duration)
+            let entry = TrafficEntry(
+                model: model,
+                routeType: entryRouteType,
+                requestKind: requestKind,
+                httpStatus: 502,
+                duration: duration
+            )
             await MainActor.run { trafficLog.append(entry) }
             await Self.sendError(channel: channel, status: .badGateway, message: "Upstream unreachable")
             return
@@ -268,8 +409,78 @@ enum ProxyForwarder {
 
         // 9. Publish traffic event with actual upstream status code.
         let duration = Date.now.timeIntervalSince(startTime)
-        let entry = TrafficEntry(model: model, routeType: entryRouteType, httpStatus: statusCode, duration: duration, outputTokens: capturedOutputTokens)
+        let entry = TrafficEntry(
+            model: model,
+            routeType: entryRouteType,
+            requestKind: requestKind,
+            httpStatus: statusCode,
+            duration: duration,
+            outputTokens: capturedOutputTokens
+        )
         await MainActor.run { trafficLog.append(entry) }
+    }
+
+    private static func requestKind(for uri: String) -> TrafficEntry.RequestKind {
+        let path = URLComponents(string: "http://localhost\(uri)")?.path ?? uri
+        switch path {
+        case "/v1/messages":
+            return .generation
+        case "/v1/messages/count_tokens":
+            return .countTokens
+        default:
+            return .auxiliary(endpointPath: path)
+        }
+    }
+
+    private static func collectResponseBody(_ response: HTTPClientResponse) async throws -> Data {
+        var data = Data()
+        for try await chunk in response.body {
+            if let bytes = chunk.getData(at: chunk.readerIndex, length: chunk.readableBytes) {
+                data.append(bytes)
+            }
+        }
+        return data
+    }
+
+    private static func requestSessionScopeKey(
+        bodyData: Data,
+        clientName: String,
+        channel: any Channel
+    ) -> String {
+        if let explicit = explicitSessionScopeKey(from: bodyData) {
+            return "\(clientName)|explicit|\(explicit)"
+        }
+        let channelIdentity = ObjectIdentifier(channel as AnyObject)
+        return "\(clientName)|channel|\(channelIdentity)"
+    }
+
+    private static func explicitSessionScopeKey(from bodyData: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            return nil
+        }
+
+        let directKeys = ["session_id", "conversation_id", "thread_id"]
+        for key in directKeys {
+            if let value = json[key] as? String, !value.isEmpty {
+                return "\(key)=\(value)"
+            }
+        }
+
+        if let metadata = json["metadata"] as? [String: Any] {
+            for key in directKeys {
+                if let value = metadata[key] as? String, !value.isEmpty {
+                    return "metadata.\(key)=\(value)"
+                }
+            }
+        }
+
+        if let container = json["container"] as? [String: Any],
+           let value = container["id"] as? String,
+           !value.isEmpty {
+            return "container.id=\(value)"
+        }
+
+        return nil
     }
 
     // MARK: - Failover logic
@@ -834,5 +1045,50 @@ enum ProxyForwarder {
             NIOAny(HTTPServerResponsePart.end(nil))
         ).get()
         try? await channel.close().get()
+    }
+
+    private static func commitBridgeAssistantTurnIfCurrent(
+        _ assistantTurn: PortableAssistantTurn,
+        branchContext: PreparedBranchContext,
+        branchLease: BranchRequestLease,
+        lineageBroker: any SessionLineageBrokering,
+        requestCoordinator: any BranchRequestCoordinating,
+        requestID: String
+    ) async {
+        guard await requestCoordinator.shouldCommit(lease: branchLease) else {
+            AppLog.proxy.debug(
+                "[Proxy] [\(requestID)] staleBridgeCommitDropped lineage=\(branchContext.lineageKey) branch=\(branchContext.branchKey) generation=\(branchLease.generation)"
+            )
+            return
+        }
+        do {
+            try await lineageBroker.commitResponse(context: branchContext, assistantTurn: assistantTurn)
+        } catch {
+            AppLog.proxy.error("[Proxy] [\(requestID)] bridgeCommitFailed lineage=\(branchContext.lineageKey) branch=\(branchContext.branchKey) error=\(String(describing: error))")
+        }
+    }
+
+    /// Remove Anthropic server-side tool definitions (e.g. `web_search_20250305`) from the
+    /// `tools` array so mapped vendors don't reject the request. Returns the original data
+    /// unchanged if no server-side tools are present or parsing fails.
+    private static let serverSideToolTypes: Set<String> = ["web_search_20250305"]
+
+    static func stripServerSideTools(from bodyData: Data) -> Data {
+        guard var json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+              let tools = json["tools"] as? [[String: Any]] else {
+            return bodyData
+        }
+        let filtered = tools.filter { tool in
+            guard let type = tool["type"] as? String else { return true }
+            return !serverSideToolTypes.contains(type)
+        }
+        guard filtered.count != tools.count else { return bodyData }
+        if filtered.isEmpty {
+            json.removeValue(forKey: "tools")
+            json.removeValue(forKey: "tool_choice")
+        } else {
+            json["tools"] = filtered
+        }
+        return (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? bodyData
     }
 }
