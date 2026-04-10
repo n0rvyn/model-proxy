@@ -5,6 +5,7 @@ protocol SessionLineageBrokering: Actor, Sendable {
     func prepareRequest(
         bodyData: Data,
         clientName: String,
+        sessionScopeKey: String?,
         target: RoutingSnapshot.RouteTarget
     ) throws -> PreparedRequest
 
@@ -13,7 +14,26 @@ protocol SessionLineageBrokering: Actor, Sendable {
         assistantTurn: PortableAssistantTurn
     ) throws
 
-    func branches(for clientName: String) -> [BranchTranscript]
+    func branches(for clientName: String, sessionScopeKey: String?) -> [BranchTranscript]
+}
+
+extension SessionLineageBrokering {
+    func prepareRequest(
+        bodyData: Data,
+        clientName: String,
+        target: RoutingSnapshot.RouteTarget
+    ) throws -> PreparedRequest {
+        try prepareRequest(
+            bodyData: bodyData,
+            clientName: clientName,
+            sessionScopeKey: nil,
+            target: target
+        )
+    }
+
+    func branches(for clientName: String) -> [BranchTranscript] {
+        branches(for: clientName, sessionScopeKey: nil)
+    }
 }
 
 actor SessionLineageBroker: SessionLineageBrokering {
@@ -44,18 +64,20 @@ actor SessionLineageBroker: SessionLineageBrokering {
     func prepareRequest(
         bodyData: Data,
         clientName: String,
+        sessionScopeKey: String?,
         target: RoutingSnapshot.RouteTarget
     ) throws -> PreparedRequest {
         let prepared = try projector.prepareRequest(
             bodyData: bodyData,
             clientName: clientName,
+            sessionScopeKey: sessionScopeKey,
             target: target,
-            existingBranches: branches(for: clientName),
+            existingBranches: branches(for: clientName, sessionScopeKey: sessionScopeKey),
             fingerprint: fingerprint
         )
         if let context = prepared.context {
             AppLog.proxy.debug(
-                "[Proxy] [Lineage] client=\(context.clientName) lineage=\(context.lineageKey) branch=\(context.branchKey) vendor=\(context.vendorKey) replay=\(context.replayPolicy.rawValue) reused=\(context.reusedBranchHistory) reusedPortable=\(context.reusedPortableMessageCount)"
+                "[Proxy] [Lineage] client=\(context.clientName) session=\(context.sessionScopeKey ?? "none") lineage=\(context.lineageKey) branch=\(context.branchKey) vendor=\(context.vendorKey) replay=\(context.replayPolicy.rawValue) reused=\(context.reusedBranchHistory) reusedPortable=\(context.reusedPortableMessageCount)"
             )
         }
         return prepared
@@ -78,6 +100,7 @@ actor SessionLineageBroker: SessionLineageBrokering {
         var lineage = lineages[context.lineageKey] ?? ConversationLineage(
             lineageKey: context.lineageKey,
             clientName: context.clientName,
+            sessionScopeKey: context.sessionScopeKey,
             branches: [:],
             lastUpdatedAt: .now
         )
@@ -85,6 +108,7 @@ actor SessionLineageBroker: SessionLineageBrokering {
             lineageKey: context.lineageKey,
             branchKey: context.branchKey,
             clientName: context.clientName,
+            sessionScopeKey: context.sessionScopeKey,
             vendorKey: context.vendorKey,
             signingDomain: context.signingDomain,
             replayPolicy: context.replayPolicy,
@@ -101,9 +125,9 @@ actor SessionLineageBroker: SessionLineageBrokering {
         lineages = updatedLineages
     }
 
-    func branches(for clientName: String) -> [BranchTranscript] {
+    func branches(for clientName: String, sessionScopeKey: String?) -> [BranchTranscript] {
         lineages.values
-            .filter { $0.clientName == clientName }
+            .filter { $0.clientName == clientName && $0.sessionScopeKey == sessionScopeKey }
             .flatMap { $0.branches.values }
     }
 

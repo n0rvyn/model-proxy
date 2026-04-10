@@ -15,6 +15,7 @@ struct ReplayableBranchResponse: Sendable {
 struct BranchRequestLease: Sendable, Equatable {
     let id: UUID
     let clientName: String
+    let sessionScopeKey: String?
     let vendorKey: String
     let lineageKey: String
     let branchKey: String
@@ -66,6 +67,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
 
         let scopeKey = scopeKey(
             clientName: context.clientName,
+            sessionScopeKey: context.sessionScopeKey,
             vendorKey: context.vendorKey,
             branchKey: context.branchKey
         )
@@ -75,6 +77,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
         let lease = BranchRequestLease(
             id: UUID(),
             clientName: context.clientName,
+            sessionScopeKey: context.sessionScopeKey,
             vendorKey: context.vendorKey,
             lineageKey: context.lineageKey,
             branchKey: context.branchKey,
@@ -109,6 +112,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
     private func exactEntry(for context: PreparedBranchContext) -> InFlightEntry? {
         entries.values.first { entry in
             entry.lease.clientName == context.clientName
+            && entry.lease.sessionScopeKey == context.sessionScopeKey
             && entry.lease.vendorKey == context.vendorKey
             && entry.lease.portableMessageHashes == context.preparedPortableMessageHashes
         }
@@ -118,6 +122,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
         entries.values
             .filter { entry in
                 entry.lease.clientName == context.clientName
+                && entry.lease.sessionScopeKey == context.sessionScopeKey
                 && entry.lease.vendorKey == context.vendorKey
                 && sharesBranchLineage(
                     lhs: entry.lease.portableMessageHashes,
@@ -139,10 +144,20 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
     }
 
     private func scopeKey(for lease: BranchRequestLease) -> String {
-        scopeKey(clientName: lease.clientName, vendorKey: lease.vendorKey, branchKey: lease.branchKey)
+        scopeKey(
+            clientName: lease.clientName,
+            sessionScopeKey: lease.sessionScopeKey,
+            vendorKey: lease.vendorKey,
+            branchKey: lease.branchKey
+        )
     }
 
-    private func scopeKey(clientName: String, vendorKey: String, branchKey: String) -> String {
-        "\(clientName)|\(vendorKey)|\(branchKey)"
+    private func scopeKey(
+        clientName: String,
+        sessionScopeKey: String?,
+        vendorKey: String,
+        branchKey: String
+    ) -> String {
+        "\(clientName)|\(sessionScopeKey ?? "none")|\(vendorKey)|\(branchKey)"
     }
 }

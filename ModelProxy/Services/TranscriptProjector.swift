@@ -4,10 +4,30 @@ protocol TranscriptProjecting: Sendable {
     nonisolated func prepareRequest(
         bodyData: Data,
         clientName: String,
+        sessionScopeKey: String?,
         target: RoutingSnapshot.RouteTarget,
         existingBranches: [BranchTranscript],
         fingerprint: any ConversationFingerprinting
     ) throws -> PreparedRequest
+}
+
+extension TranscriptProjecting {
+    nonisolated func prepareRequest(
+        bodyData: Data,
+        clientName: String,
+        target: RoutingSnapshot.RouteTarget,
+        existingBranches: [BranchTranscript],
+        fingerprint: any ConversationFingerprinting
+    ) throws -> PreparedRequest {
+        try prepareRequest(
+            bodyData: bodyData,
+            clientName: clientName,
+            sessionScopeKey: nil,
+            target: target,
+            existingBranches: existingBranches,
+            fingerprint: fingerprint
+        )
+    }
 }
 
 enum TranscriptProjectorError: Error {
@@ -20,6 +40,7 @@ struct TranscriptProjector: TranscriptProjecting {
     nonisolated func prepareRequest(
         bodyData: Data,
         clientName: String,
+        sessionScopeKey: String?,
         target: RoutingSnapshot.RouteTarget,
         existingBranches: [BranchTranscript],
         fingerprint: any ConversationFingerprinting
@@ -46,6 +67,7 @@ struct TranscriptProjector: TranscriptProjecting {
         let vendorKey = Self.vendorKey(for: target)
         let matchedBranch = Self.bestMatchingBranch(
             for: portableMessageHashes,
+            sessionScopeKey: sessionScopeKey,
             vendorKey: vendorKey,
             branches: existingBranches
         )
@@ -66,7 +88,11 @@ struct TranscriptProjector: TranscriptProjecting {
             reusedPortableMessageCount = matchedBranch.portableMessageHashes.count
         } else {
             fullMessages = vendorReadyMessages
-            lineageKey = fingerprint.sha256Hex(portableMessagesData)
+            let lineageSeed = Self.lineageSeed(
+                portableMessagesData: portableMessagesData,
+                sessionScopeKey: sessionScopeKey
+            )
+            lineageKey = fingerprint.sha256Hex(lineageSeed)
             branchKey = fingerprint.sha256Hex(Data("\(lineageKey)|\(vendorKey)".utf8))
             reusedBranchHistory = false
             reusedPortableMessageCount = 0
@@ -80,6 +106,7 @@ struct TranscriptProjector: TranscriptProjecting {
             lineageKey: lineageKey,
             branchKey: branchKey,
             clientName: clientName,
+            sessionScopeKey: sessionScopeKey,
             vendorKey: vendorKey,
             signingDomain: target.signingDomain,
             replayPolicy: target.replayPolicy,
@@ -103,12 +130,14 @@ struct TranscriptProjector: TranscriptProjecting {
 
     nonisolated static func bestMatchingBranch(
         for portableMessageHashes: [String],
+        sessionScopeKey: String?,
         vendorKey: String,
         branches: [BranchTranscript]
     ) -> BranchTranscript? {
         branches
             .filter { branch in
-                branch.vendorKey == vendorKey
+                branch.sessionScopeKey == sessionScopeKey
+                && branch.vendorKey == vendorKey
                 && branch.portableMessageHashes.count <= portableMessageHashes.count
                 && Array(portableMessageHashes.prefix(branch.portableMessageHashes.count)) == branch.portableMessageHashes
             }
@@ -123,13 +152,13 @@ struct TranscriptProjector: TranscriptProjecting {
     nonisolated static func makePortableMessage(from message: [String: Any]) -> [String: Any]? {
         let normalizedMessage = ToolUseIDNormalizer.normalizeMessage(message)
         guard let content = normalizedMessage["content"] else {
-            return normalizedMessage
+            return PortableReplayCanonicalizer.canonicalizeMessage(normalizedMessage)
         }
         guard let blocks = content as? [Any] else {
-            return normalizedMessage
+            return PortableReplayCanonicalizer.canonicalizeMessage(normalizedMessage)
         }
 
-        var portableMessage = normalizedMessage
+        var portableMessage = PortableReplayCanonicalizer.canonicalizeMessage(normalizedMessage)
         let portableBlocks = makePortableBlocks(from: blocks)
 
         if let role = normalizedMessage["role"] as? String, role == "assistant", portableBlocks.isEmpty {
@@ -157,7 +186,9 @@ struct TranscriptProjector: TranscriptProjecting {
         var vendorMessage = normalizedMessage
         let vendorBlocks = makeVendorReadyBlocks(from: blocks)
 
-        if let role = normalizedMessage["role"] as? String, role == "assistant", vendorBlocks.isEmpty {
+        if let role = normalizedMessage["role"] as? String,
+           (role == "assistant" || role == "user"),
+           vendorBlocks.isEmpty {
             vendorMessage["content"] = [["type": "text", "text": ""]]
         } else {
             vendorMessage["content"] = vendorBlocks
@@ -165,19 +196,23 @@ struct TranscriptProjector: TranscriptProjecting {
         return vendorMessage
     }
 
+    /// Content block types that third-party vendors support via the Anthropic Messages API.
+    /// Blocks with types outside this set are Anthropic-internal (e.g. advisor_tool_result)
+    /// and are silently dropped to avoid 400 errors from vendors.
+    private static let vendorSafeBlockTypes: Set<String> = [
+        "text", "image", "document", "tool_use", "tool_result", "thinking"
+    ]
+
     nonisolated static func makeVendorReadyBlocks(from blocks: [Any]) -> [Any] {
         blocks.compactMap { block in
             guard let dictionary = block as? [String: Any] else {
                 return block
             }
-            // Drop redacted_thinking entirely (Anthropic-specific, no useful content).
-            if let type = (dictionary["type"] as? String)?.lowercased(),
-               type == "redacted_thinking" {
+            guard let type = (dictionary["type"] as? String)?.lowercased(),
+                  vendorSafeBlockTypes.contains(type) else {
                 return nil
             }
-            if dictionary["redacted_thinking"] != nil { return nil }
 
-            // Keep all other blocks (including thinking), strip only the signature field.
             var sanitized = dictionary
             sanitized.removeValue(forKey: "signature")
             return sanitized
@@ -192,10 +227,7 @@ struct TranscriptProjector: TranscriptProjecting {
             guard !isNonPortableBlock(dictionary) else {
                 return nil
             }
-
-            var sanitized = dictionary
-            sanitized.removeValue(forKey: "signature")
-            return sanitized
+            return PortableReplayCanonicalizer.canonicalizeBlock(dictionary)
         }
     }
 
@@ -231,5 +263,18 @@ struct TranscriptProjector: TranscriptProjecting {
         }
         messages.append(message)
         return try encodeMessages(messages)
+    }
+
+    private nonisolated static func lineageSeed(
+        portableMessagesData: Data,
+        sessionScopeKey: String?
+    ) -> Data {
+        guard let sessionScopeKey else {
+            return portableMessagesData
+        }
+        var seed = Data(sessionScopeKey.utf8)
+        seed.append(0)
+        seed.append(portableMessagesData)
+        return seed
     }
 }
