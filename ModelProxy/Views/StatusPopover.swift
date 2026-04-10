@@ -358,13 +358,14 @@ private struct TrafficRowView: View {
 
             Text(entry.model)
                 .font(.caption2)
+                .foregroundStyle(entry.requestKind.isAuxiliary ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(routeLabel)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(entry.requestKind.isAuxiliary ? .tertiary : .secondary)
                 .lineLimit(1)
 
             Text("\(entry.httpStatus)")
@@ -384,6 +385,7 @@ private struct TrafficRowView: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 3)
+        .opacity(entry.requestKind.isAuxiliary ? 0.82 : 1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(entry.model), \(routeLabel), HTTP \(entry.httpStatus), \(durationText), \(tpsText) t/s")
     }
@@ -405,6 +407,7 @@ private struct TrafficRowView: View {
     }
 
     private var tpsText: String {
+        guard entry.requestKind.shouldDisplayTPS else { return "—" }
         guard let tokens = entry.outputTokens, tokens > 0,
               let d = entry.duration, d > 0 else { return "—" }
         return "\(Int(Double(tokens) / d))"
@@ -431,9 +434,9 @@ private struct TrafficRowView: View {
         .environment(ProxyServer(tokenStatsStore: store))
         .environment({
             let log = TrafficLog()
-            log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .mapped(targetModel: "qwen-plus"), httpStatus: 200, duration: 12.3, outputTokens: 520))
-            log.append(TrafficEntry(model: "claude-sonnet-4-6", routeType: .passthrough, httpStatus: 200))
-            log.append(TrafficEntry(model: "gpt-4o", routeType: .blocked, httpStatus: 403))
+            log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .mapped(targetModel: "qwen-plus"), requestKind: .generation, httpStatus: 200, duration: 12.3, outputTokens: 520))
+            log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .passthrough, requestKind: .countTokens, httpStatus: 200, duration: 0.3))
+            log.append(TrafficEntry(model: "gpt-4o", routeType: .blocked, requestKind: .blocked, httpStatus: 403))
             return log
         }())
         .environment(store)
