@@ -11,9 +11,43 @@ struct TrafficEntry: Identifiable, Sendable {
         case blocked
     }
 
+    enum RequestKind: Sendable, Equatable {
+        case generation
+        case countTokens
+        case auxiliary(endpointPath: String)
+        case blocked
+
+        var endpointLabel: String {
+            switch self {
+            case .generation:
+                return "messages"
+            case .countTokens:
+                return "count_tokens"
+            case .auxiliary(let endpointPath):
+                return endpointPath
+            case .blocked:
+                return "blocked"
+            }
+        }
+
+        var isAuxiliary: Bool {
+            switch self {
+            case .generation, .blocked:
+                return false
+            case .countTokens, .auxiliary:
+                return true
+            }
+        }
+
+        var shouldDisplayTPS: Bool {
+            self == .generation
+        }
+    }
+
     let id: UUID
     let model: String
     let routeType: RouteType
+    let requestKind: RequestKind
     /// HTTP status returned to the client (200, 403, 502, etc.)
     let httpStatus: Int
     let timestamp: Date
@@ -22,10 +56,19 @@ struct TrafficEntry: Identifiable, Sendable {
     /// Output tokens from this request; nil when unavailable (blocked, replay, or no usage data).
     let outputTokens: Int?
 
-    init(model: String, routeType: RouteType, httpStatus: Int, duration: TimeInterval? = nil, outputTokens: Int? = nil, timestamp: Date = .now) {
+    init(
+        model: String,
+        routeType: RouteType,
+        requestKind: RequestKind,
+        httpStatus: Int,
+        duration: TimeInterval? = nil,
+        outputTokens: Int? = nil,
+        timestamp: Date = .now
+    ) {
         self.id = UUID()
         self.model = model
         self.routeType = routeType
+        self.requestKind = requestKind
         self.httpStatus = httpStatus
         self.duration = duration
         self.outputTokens = outputTokens
