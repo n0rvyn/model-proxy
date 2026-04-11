@@ -320,10 +320,12 @@ enum ProxyForwarder {
             }
         }
 
-        // 3b. Strip server-side tools that the vendor cannot handle when no bridge is configured.
+        // 3b. Sanitize tools for mapped vendors (always, regardless of web search config).
+        // WebSearchBridge handles web_search_* tools separately; this catches other
+        // vendor-incompatible tools (empty name, missing input_schema, server-side types).
         var forwardBodyData = preparedRequest.bodyData
-        if webSearchProvider == nil, !webSearchForwardAsIs, !target.isPassthrough {
-            forwardBodyData = Self.stripServerSideTools(from: forwardBodyData)
+        if !target.isPassthrough {
+            forwardBodyData = Self.sanitizeToolsForVendor(in: forwardBodyData)
         }
 
         // 4. Build and send upstream request.
@@ -1068,21 +1070,29 @@ enum ProxyForwarder {
         }
     }
 
-    /// Remove Anthropic server-side tool definitions (e.g. `web_search_20250305`) from the
-    /// `tools` array so mapped vendors don't reject the request. Returns the original data
-    /// unchanged if no server-side tools are present or parsing fails.
-    private static let serverSideToolTypes: Set<String> = ["web_search_20250305"]
-
-    static func stripServerSideTools(from bodyData: Data) -> Data {
+    /// Remove tool definitions that mapped vendors cannot handle.
+    /// Keeps only tools with a non-empty `name` and a present `input_schema` —
+    /// the Anthropic Messages API contract for custom (user-defined) tools.
+    /// Server-side tools (web_search, computer_use, etc.) use `type` instead
+    /// of `name` + `input_schema`, so they are naturally excluded.
+    static func sanitizeToolsForVendor(in bodyData: Data) -> Data {
         guard var json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
               let tools = json["tools"] as? [[String: Any]] else {
             return bodyData
         }
         let filtered = tools.filter { tool in
-            guard let type = tool["type"] as? String else { return true }
-            return !serverSideToolTypes.contains(type)
+            guard let name = tool["name"] as? String, !name.isEmpty else { return false }
+            guard tool["input_schema"] != nil else { return false }
+            return true
         }
-        guard filtered.count != tools.count else { return bodyData }
+        let removedCount = tools.count - filtered.count
+        guard removedCount > 0 else { return bodyData }
+        let removedNames = tools.filter { tool in
+            let name = tool["name"] as? String ?? ""
+            let hasSchema = tool["input_schema"] != nil
+            return name.isEmpty || !hasSchema
+        }.map { ($0["type"] as? String) ?? ($0["name"] as? String) ?? "unknown" }
+        AppLog.proxy.info("[Proxy] sanitizeToolsForVendor: removed \(removedCount) tools: \(removedNames.joined(separator: ", "))")
         if filtered.isEmpty {
             json.removeValue(forKey: "tools")
             json.removeValue(forKey: "tool_choice")

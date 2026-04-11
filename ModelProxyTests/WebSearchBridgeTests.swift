@@ -350,10 +350,10 @@ struct WebSearchBridgeTests {
         #expect(content.first?["text"] as? String == "Found references on both topics.")
     }
 
-    @Test func stripServerSideToolsRemovesWebSearchAndKeepsOthers() throws {
+    @Test func sanitizeToolsForVendorRemovesWebSearchAndKeepsOthers() throws {
         let body = try requestBody(stream: false)
-        let stripped = ProxyForwarder.stripServerSideTools(from: body)
-        let json = try #require(try JSONSerialization.jsonObject(with: stripped) as? [String: Any])
+        let sanitized = ProxyForwarder.sanitizeToolsForVendor(in: body)
+        let json = try #require(try JSONSerialization.jsonObject(with: sanitized) as? [String: Any])
         let tools = try #require(json["tools"] as? [[String: Any]])
         #expect(tools.count == 1)
         #expect(tools[0]["name"] as? String == "bash")
