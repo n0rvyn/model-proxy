@@ -6,6 +6,7 @@ protocol SessionLineageBrokering: Actor, Sendable {
         bodyData: Data,
         clientName: String,
         sessionScopeKey: String?,
+        coordinationScopeKey: String?,
         target: RoutingSnapshot.RouteTarget
     ) throws -> PreparedRequest
 
@@ -27,6 +28,22 @@ extension SessionLineageBrokering {
             bodyData: bodyData,
             clientName: clientName,
             sessionScopeKey: nil,
+            coordinationScopeKey: nil,
+            target: target
+        )
+    }
+
+    func prepareRequest(
+        bodyData: Data,
+        clientName: String,
+        sessionScopeKey: String?,
+        target: RoutingSnapshot.RouteTarget
+    ) throws -> PreparedRequest {
+        try prepareRequest(
+            bodyData: bodyData,
+            clientName: clientName,
+            sessionScopeKey: sessionScopeKey,
+            coordinationScopeKey: sessionScopeKey,
             target: target
         )
     }
@@ -65,19 +82,21 @@ actor SessionLineageBroker: SessionLineageBrokering {
         bodyData: Data,
         clientName: String,
         sessionScopeKey: String?,
+        coordinationScopeKey: String?,
         target: RoutingSnapshot.RouteTarget
     ) throws -> PreparedRequest {
         let prepared = try projector.prepareRequest(
             bodyData: bodyData,
             clientName: clientName,
             sessionScopeKey: sessionScopeKey,
+            coordinationScopeKey: coordinationScopeKey,
             target: target,
-            existingBranches: branches(for: clientName, sessionScopeKey: sessionScopeKey),
+            existingBranches: branchCandidates(for: clientName, sessionScopeKey: sessionScopeKey),
             fingerprint: fingerprint
         )
         if let context = prepared.context {
             AppLog.proxy.debug(
-                "[Proxy] [Lineage] client=\(context.clientName) session=\(context.sessionScopeKey ?? "none") lineage=\(context.lineageKey) branch=\(context.branchKey) vendor=\(context.vendorKey) replay=\(context.replayPolicy.rawValue) reused=\(context.reusedBranchHistory) reusedPortable=\(context.reusedPortableMessageCount)"
+                "[Proxy] [Lineage] client=\(context.clientName) session=\(context.sessionScopeKey ?? "none") coordination=\(context.coordinationScopeKey ?? "none") lineage=\(context.lineageKey) branch=\(context.branchKey) vendor=\(context.vendorKey) replay=\(context.replayPolicy.rawValue) reused=\(context.reusedBranchHistory) reusedPortable=\(context.reusedPortableMessageCount)"
             )
         }
         return prepared
@@ -127,8 +146,22 @@ actor SessionLineageBroker: SessionLineageBrokering {
 
     func branches(for clientName: String, sessionScopeKey: String?) -> [BranchTranscript] {
         lineages.values
-            .filter { $0.clientName == clientName && $0.sessionScopeKey == sessionScopeKey }
             .flatMap { $0.branches.values }
+            .filter { $0.clientName == clientName && $0.sessionScopeKey == sessionScopeKey }
+    }
+
+    private func branchCandidates(for clientName: String, sessionScopeKey: String?) -> [BranchTranscript] {
+        let candidates = lineages.values
+            .filter { $0.clientName == clientName }
+            .flatMap { $0.branches.values }
+
+        guard sessionScopeKey == nil else {
+            return candidates.filter { $0.sessionScopeKey == sessionScopeKey }
+        }
+        return candidates.filter { branch in
+            guard let branchSessionScopeKey = branch.sessionScopeKey else { return true }
+            return branchSessionScopeKey.contains("|channel|")
+        }
     }
 
     private func trimLineages(for clientName: String, in lineages: inout [String: ConversationLineage]) {

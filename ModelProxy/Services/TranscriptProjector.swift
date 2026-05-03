@@ -5,6 +5,7 @@ protocol TranscriptProjecting: Sendable {
         bodyData: Data,
         clientName: String,
         sessionScopeKey: String?,
+        coordinationScopeKey: String?,
         target: RoutingSnapshot.RouteTarget,
         existingBranches: [BranchTranscript],
         fingerprint: any ConversationFingerprinting
@@ -23,6 +24,26 @@ extension TranscriptProjecting {
             bodyData: bodyData,
             clientName: clientName,
             sessionScopeKey: nil,
+            coordinationScopeKey: nil,
+            target: target,
+            existingBranches: existingBranches,
+            fingerprint: fingerprint
+        )
+    }
+
+    nonisolated func prepareRequest(
+        bodyData: Data,
+        clientName: String,
+        sessionScopeKey: String?,
+        target: RoutingSnapshot.RouteTarget,
+        existingBranches: [BranchTranscript],
+        fingerprint: any ConversationFingerprinting
+    ) throws -> PreparedRequest {
+        try prepareRequest(
+            bodyData: bodyData,
+            clientName: clientName,
+            sessionScopeKey: sessionScopeKey,
+            coordinationScopeKey: sessionScopeKey,
             target: target,
             existingBranches: existingBranches,
             fingerprint: fingerprint
@@ -41,6 +62,7 @@ struct TranscriptProjector: TranscriptProjecting {
         bodyData: Data,
         clientName: String,
         sessionScopeKey: String?,
+        coordinationScopeKey: String?,
         target: RoutingSnapshot.RouteTarget,
         existingBranches: [BranchTranscript],
         fingerprint: any ConversationFingerprinting
@@ -62,7 +84,10 @@ struct TranscriptProjector: TranscriptProjecting {
             fingerprint.sha256Hex((try? Self.encodeJSONObject(message)) ?? Data())
         }
 
-        let vendorReadyMessages = Self.makeVendorReadyMessages(from: originalMessages)
+        let vendorReadyMessages = Self.makeVendorReadyMessages(
+            from: originalMessages,
+            supportsThinkingBlocks: target.supportsThinkingBlocks
+        )
 
         let vendorKey = Self.vendorKey(for: target)
         let matchedBranch = Self.bestMatchingBranch(
@@ -81,7 +106,13 @@ struct TranscriptProjector: TranscriptProjecting {
         if let matchedBranch,
            let branchFullMessages = try? Self.decodeMessagesData(matchedBranch.fullMessagesData) {
             let suffix = Array(vendorReadyMessages.dropFirst(matchedBranch.portableMessageHashes.count))
-            fullMessages = branchFullMessages + suffix
+            let branchMessagesForTarget = target.supportsThinkingBlocks
+                ? branchFullMessages
+                : Self.makeVendorReadyMessages(
+                    from: branchFullMessages,
+                    supportsThinkingBlocks: false
+                )
+            fullMessages = branchMessagesForTarget + suffix
             lineageKey = matchedBranch.lineageKey
             branchKey = matchedBranch.branchKey
             reusedBranchHistory = true
@@ -93,7 +124,14 @@ struct TranscriptProjector: TranscriptProjecting {
                 sessionScopeKey: sessionScopeKey
             )
             lineageKey = fingerprint.sha256Hex(lineageSeed)
-            branchKey = fingerprint.sha256Hex(Data("\(lineageKey)|\(vendorKey)".utf8))
+            branchKey = fingerprint.sha256Hex(
+                Self.branchSeed(
+                    lineageKey: lineageKey,
+                    vendorKey: vendorKey,
+                    sessionScopeKey: sessionScopeKey,
+                    coordinationScopeKey: coordinationScopeKey
+                )
+            )
             reusedBranchHistory = false
             reusedPortableMessageCount = 0
         }
@@ -107,6 +145,7 @@ struct TranscriptProjector: TranscriptProjecting {
             branchKey: branchKey,
             clientName: clientName,
             sessionScopeKey: sessionScopeKey,
+            coordinationScopeKey: coordinationScopeKey,
             vendorKey: vendorKey,
             signingDomain: target.signingDomain,
             replayPolicy: target.replayPolicy,
@@ -136,12 +175,23 @@ struct TranscriptProjector: TranscriptProjecting {
     ) -> BranchTranscript? {
         branches
             .filter { branch in
-                branch.sessionScopeKey == sessionScopeKey
+                Self.isSessionScopeCompatible(branch.sessionScopeKey, request: sessionScopeKey)
                 && branch.vendorKey == vendorKey
                 && branch.portableMessageHashes.count <= portableMessageHashes.count
                 && Array(portableMessageHashes.prefix(branch.portableMessageHashes.count)) == branch.portableMessageHashes
             }
             .max { lhs, rhs in lhs.portableMessageHashes.count < rhs.portableMessageHashes.count }
+    }
+
+    nonisolated static func isSessionScopeCompatible(
+        _ branchSessionScopeKey: String?,
+        request sessionScopeKey: String?
+    ) -> Bool {
+        if let sessionScopeKey {
+            return branchSessionScopeKey == sessionScopeKey
+        }
+        guard let branchSessionScopeKey else { return true }
+        return branchSessionScopeKey.contains("|channel|")
     }
 
     nonisolated static func makePortableMessages(from messages: [[String: Any]]) -> [[String: Any]] {
@@ -169,12 +219,23 @@ struct TranscriptProjector: TranscriptProjecting {
         return portableMessage
     }
 
-    nonisolated static func makeVendorReadyMessages(from messages: [[String: Any]]) -> [[String: Any]] {
+    nonisolated static func makeVendorReadyMessages(
+        from messages: [[String: Any]],
+        supportsThinkingBlocks: Bool = true
+    ) -> [[String: Any]] {
         let normalized = ToolUseIDNormalizer.normalizeMessages(messages)
-        return normalized.messages.compactMap(makeVendorReadyMessage(from:))
+        return normalized.messages.compactMap { message in
+            makeVendorReadyMessage(
+                from: message,
+                supportsThinkingBlocks: supportsThinkingBlocks
+            )
+        }
     }
 
-    nonisolated static func makeVendorReadyMessage(from message: [String: Any]) -> [String: Any]? {
+    nonisolated static func makeVendorReadyMessage(
+        from message: [String: Any],
+        supportsThinkingBlocks: Bool = true
+    ) -> [String: Any]? {
         let normalizedMessage = ToolUseIDNormalizer.normalizeMessage(message)
         guard let content = normalizedMessage["content"] else {
             return normalizedMessage
@@ -184,7 +245,10 @@ struct TranscriptProjector: TranscriptProjecting {
         }
 
         var vendorMessage = normalizedMessage
-        let vendorBlocks = makeVendorReadyBlocks(from: blocks)
+        let vendorBlocks = makeVendorReadyBlocks(
+            from: blocks,
+            supportsThinkingBlocks: supportsThinkingBlocks
+        )
 
         if let role = normalizedMessage["role"] as? String,
            (role == "assistant" || role == "user"),
@@ -203,10 +267,16 @@ struct TranscriptProjector: TranscriptProjecting {
         "text", "image", "document", "tool_use", "tool_result", "thinking"
     ]
 
-    nonisolated static func makeVendorReadyBlocks(from blocks: [Any]) -> [Any] {
+    nonisolated static func makeVendorReadyBlocks(
+        from blocks: [Any],
+        supportsThinkingBlocks: Bool = true
+    ) -> [Any] {
         blocks.compactMap { block in
             guard let dictionary = block as? [String: Any] else {
                 return block
+            }
+            if isThinkingLikeBlock(dictionary), !supportsThinkingBlocks {
+                return nil
             }
             guard let type = (dictionary["type"] as? String)?.lowercased(),
                   vendorSafeBlockTypes.contains(type) else {
@@ -217,6 +287,12 @@ struct TranscriptProjector: TranscriptProjecting {
             sanitized.removeValue(forKey: "signature")
             return sanitized
         }
+    }
+
+    nonisolated static func isThinkingLikeBlock(_ block: [String: Any]) -> Bool {
+        if block["thinking"] != nil || block["redacted_thinking"] != nil { return true }
+        guard let type = (block["type"] as? String)?.lowercased() else { return false }
+        return type == "thinking" || type == "redacted_thinking" || type.contains("reasoning")
     }
 
     nonisolated static func makePortableBlocks(from blocks: [Any]) -> [Any] {
@@ -276,5 +352,17 @@ struct TranscriptProjector: TranscriptProjecting {
         seed.append(0)
         seed.append(portableMessagesData)
         return seed
+    }
+
+    private nonisolated static func branchSeed(
+        lineageKey: String,
+        vendorKey: String,
+        sessionScopeKey: String?,
+        coordinationScopeKey: String?
+    ) -> Data {
+        guard sessionScopeKey == nil, let coordinationScopeKey else {
+            return Data("\(lineageKey)|\(vendorKey)".utf8)
+        }
+        return Data("\(lineageKey)|\(vendorKey)|\(coordinationScopeKey)".utf8)
     }
 }

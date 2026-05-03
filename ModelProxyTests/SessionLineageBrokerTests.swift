@@ -18,7 +18,8 @@ struct SessionLineageBrokerTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let firstRequest = try JSONSerialization.data(withJSONObject: [
@@ -84,7 +85,8 @@ struct SessionLineageBrokerTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let request = try JSONSerialization.data(withJSONObject: [
@@ -125,7 +127,8 @@ struct SessionLineageBrokerTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let firstRequest = try JSONSerialization.data(withJSONObject: [
@@ -182,6 +185,156 @@ struct SessionLineageBrokerTests {
         #expect(otherSessionPrepared.context?.reusedBranchHistory == false)
     }
 
+    @Test func brokerReusesNoExplicitBranchAcrossCoordinationScopes() async throws {
+        let broker = makeBroker()
+        let target = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.deepseek.com/anthropic",
+            apiKey: "key",
+            vendorName: "DeepSeek",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000D3"),
+            targetModel: "deepseek-v4-pro",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
+        )
+
+        let firstRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-opus-4-7",
+            "messages": [["role": "user", "content": "Run a tool"]]
+        ], options: [.sortedKeys])
+
+        let prepared = try await broker.prepareRequest(
+            bodyData: firstRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: nil,
+            coordinationScopeKey: "Claude Code|channel|a",
+            target: target
+        )
+        let context = try #require(prepared.context)
+        try await broker.commitResponse(
+            context: context,
+            assistantTurn: PortableAssistantTurn(
+                fullMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [
+                        ["type": "thinking", "thinking": "tool reasoning", "signature": "deepseek_sig"],
+                        ["type": "tool_use", "id": "toolu_1", "name": "Read", "input": ["path": "/tmp/file"]]
+                    ]
+                ], options: [.sortedKeys]),
+                portableMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [
+                        ["type": "tool_use", "id": "toolu_1", "name": "Read"]
+                    ]
+                ], options: [.sortedKeys])
+            )
+        )
+
+        let successorRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-opus-4-7",
+            "messages": [
+                ["role": "user", "content": "Run a tool"],
+                ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": "toolu_1", "name": "Read", "input": ["path": "/tmp/file"]]
+                ]],
+                ["role": "user", "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": "contents"]
+                ]]
+            ]
+        ], options: [.sortedKeys])
+
+        let successorPrepared = try await broker.prepareRequest(
+            bodyData: successorRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: nil,
+            coordinationScopeKey: "Claude Code|channel|b",
+            target: target
+        )
+
+        let successorContext = try #require(successorPrepared.context)
+        #expect(successorContext.sessionScopeKey == nil)
+        #expect(successorContext.coordinationScopeKey == "Claude Code|channel|b")
+        #expect(successorContext.reusedBranchHistory == true)
+        let json = try #require(try JSONSerialization.jsonObject(with: successorPrepared.bodyData) as? [String: Any])
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let restoredBlocks = try #require(messages[1]["content"] as? [[String: Any]])
+        #expect(restoredBlocks.first?["type"] as? String == "thinking")
+        #expect(restoredBlocks.first?["signature"] as? String == "deepseek_sig")
+    }
+
+    @Test func brokerCanReuseLegacyChannelScopedBranchForNoExplicitSession() async throws {
+        let broker = makeBroker()
+        let target = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.deepseek.com/anthropic",
+            apiKey: "key",
+            vendorName: "DeepSeek",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000D4"),
+            targetModel: "deepseek-v4-pro",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
+        )
+
+        let firstRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-opus-4-7",
+            "messages": [["role": "user", "content": "Inspect"]]
+        ], options: [.sortedKeys])
+
+        let prepared = try await broker.prepareRequest(
+            bodyData: firstRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: "Claude Code|channel|legacy",
+            coordinationScopeKey: "Claude Code|channel|legacy",
+            target: target
+        )
+        let context = try #require(prepared.context)
+        try await broker.commitResponse(
+            context: context,
+            assistantTurn: PortableAssistantTurn(
+                fullMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [
+                        ["type": "thinking", "thinking": "legacy reasoning", "signature": "legacy_sig"],
+                        ["type": "text", "text": "done"]
+                    ]
+                ], options: [.sortedKeys]),
+                portableMessageData: try JSONSerialization.data(withJSONObject: [
+                    "role": "assistant",
+                    "content": [["type": "text", "text": "done"]]
+                ], options: [.sortedKeys])
+            )
+        )
+
+        let successorRequest = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-opus-4-7",
+            "messages": [
+                ["role": "user", "content": "Inspect"],
+                ["role": "assistant", "content": [["type": "text", "text": "done"]]],
+                ["role": "user", "content": "Continue"]
+            ]
+        ], options: [.sortedKeys])
+
+        let successorPrepared = try await broker.prepareRequest(
+            bodyData: successorRequest,
+            clientName: "Claude Code",
+            sessionScopeKey: nil,
+            coordinationScopeKey: "Claude Code|channel|new",
+            target: target
+        )
+
+        #expect(successorPrepared.context?.reusedBranchHistory == true)
+        let json = try #require(try JSONSerialization.jsonObject(with: successorPrepared.bodyData) as? [String: Any])
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let restoredBlocks = try #require(messages[1]["content"] as? [[String: Any]])
+        #expect(restoredBlocks.first?["signature"] as? String == "legacy_sig")
+    }
+
     @Test func brokerReusesBranchAfterSSECommitWithoutContentBlockStop() async throws {
         let broker = makeBroker()
         let normalizer = PortableContentNormalizer().makeSSEStreamNormalizer()
@@ -196,7 +349,8 @@ struct SessionLineageBrokerTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let firstRequest = try JSONSerialization.data(withJSONObject: [
@@ -323,7 +477,8 @@ struct SessionLineageBrokerTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let initialBroker = SessionLineageBroker(store: store)

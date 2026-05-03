@@ -14,6 +14,92 @@ struct ProxyForwarderTests {
         #expect(budget.attempts == 4)
     }
 
+    @Test func countTokensBypassesMappedVendorWhenUnsupported() {
+        let vendorTarget = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.deepseek.com/anthropic",
+            apiKey: "vendor-key",
+            vendorName: "DeepSeek",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000D1"),
+            targetModel: "deepseek-v4-pro[1m]",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsAnthropicCountTokens: false,
+            repairsAnthropicToolCalls: true
+        )
+        let passthroughTarget = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.anthropic.com",
+            apiKey: "original-key",
+            vendorName: "passthrough",
+            vendorID: nil,
+            targetModel: nil,
+            isPassthrough: true,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .anthropicOfficial,
+            replayPolicy: .transparent,
+            supportsThinkingBlocks: true,
+            supportsAnthropicCountTokens: true,
+            repairsAnthropicToolCalls: false
+        )
+
+        let decision = ProxyForwarder.effectiveTarget(
+            for: .countTokens,
+            resolvedTarget: vendorTarget,
+            passthroughTarget: passthroughTarget
+        )
+
+        #expect(decision.didBypass == true)
+        #expect(decision.bypassedVendorName == "DeepSeek")
+        #expect(decision.target.isPassthrough == true)
+        #expect(decision.target.baseURL == "https://api.anthropic.com")
+        #expect(decision.target.apiKey == "original-key")
+    }
+
+    @Test func countTokensStaysMappedWhenVendorSupportsEndpoint() {
+        let vendorTarget = RoutingSnapshot.RouteTarget(
+            baseURL: "https://supports.example.com/anthropic",
+            apiKey: "vendor-key",
+            vendorName: "Supports",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000C1"),
+            targetModel: "target-model",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsAnthropicCountTokens: true,
+            repairsAnthropicToolCalls: false
+        )
+        let passthroughTarget = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.anthropic.com",
+            apiKey: "original-key",
+            vendorName: "passthrough",
+            vendorID: nil,
+            targetModel: nil,
+            isPassthrough: true,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .anthropicOfficial,
+            replayPolicy: .transparent,
+            supportsThinkingBlocks: true,
+            supportsAnthropicCountTokens: true,
+            repairsAnthropicToolCalls: false
+        )
+
+        let decision = ProxyForwarder.effectiveTarget(
+            for: .countTokens,
+            resolvedTarget: vendorTarget,
+            passthroughTarget: passthroughTarget
+        )
+
+        #expect(decision.didBypass == false)
+        #expect(decision.target.vendorName == "Supports")
+        #expect(decision.target.isPassthrough == false)
+    }
+
     @Test func sanitizeToolsRemovesToolsWithEmptyName() throws {
         let body = try JSONSerialization.data(withJSONObject: [
             "model": "test",

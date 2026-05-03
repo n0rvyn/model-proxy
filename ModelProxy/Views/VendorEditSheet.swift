@@ -19,6 +19,10 @@ struct VendorEditSheet: View {
     @State private var supportedModels: [String] = [""]
     @State private var modelInputPrices: [Int: String] = [:]
     @State private var modelOutputPrices: [Int: String] = [:]
+    @State private var supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks
+    @State private var supportsAnthropicCountTokens: Bool = VendorDefaults.supportsAnthropicCountTokens
+    @State private var repairsAnthropicToolCalls: Bool = VendorDefaults.repairsAnthropicToolCalls
+    @State private var capabilityDefaultsManuallyEdited: Bool = false
     @State private var signingDomain: SigningDomain = .compatibleThirdParty
     @State private var replayPolicy: TranscriptReplayPolicy = .portableOnly
 
@@ -32,6 +36,10 @@ struct VendorEditSheet: View {
                     TextField("Name", text: $name)
                     TextField("Base URL", text: $baseURL)
                         .autocorrectionDisabled()
+                        .onChange(of: baseURL) { newBaseURL in
+                            guard !isEditing, !capabilityDefaultsManuallyEdited else { return }
+                            applyCapabilityDefaults(for: newBaseURL)
+                        }
 
                     HStack {
                         if showAPIKey {
@@ -65,6 +73,10 @@ struct VendorEditSheet: View {
                             Text(policy.displayName).tag(policy)
                         }
                     }
+
+                    Toggle("Supports Thinking Blocks", isOn: $supportsThinkingBlocks)
+                    Toggle("Supports Count Tokens", isOn: supportsAnthropicCountTokensBinding)
+                    Toggle("Repair Tool Call Inputs", isOn: repairsAnthropicToolCallsBinding)
                 }
 
                 Section {
@@ -179,6 +191,9 @@ struct VendorEditSheet: View {
                 compatibleClientID = vendor.compatibleClientID
                 supportedModels = vendor.supportedModels.isEmpty ? [""] : vendor.supportedModels
                 initializeModelPrices()
+                supportsThinkingBlocks = vendor.supportsThinkingBlocks
+                supportsAnthropicCountTokens = vendor.supportsAnthropicCountTokens
+                repairsAnthropicToolCalls = vendor.repairsAnthropicToolCalls
                 signingDomain = vendor.signingDomain
                 replayPolicy = vendor.replayPolicy
             }
@@ -196,6 +211,9 @@ struct VendorEditSheet: View {
             configStore.config.vendors[idx].readTimeoutSeconds = readTimeoutSeconds
             configStore.config.vendors[idx].compatibleClientID = compatibleClientID
             configStore.config.vendors[idx].supportedModels = normalizedSupportedModels
+            configStore.config.vendors[idx].supportsThinkingBlocks = supportsThinkingBlocks
+            configStore.config.vendors[idx].supportsAnthropicCountTokens = supportsAnthropicCountTokens
+            configStore.config.vendors[idx].repairsAnthropicToolCalls = repairsAnthropicToolCalls
             configStore.config.vendors[idx].signingDomain = signingDomain
             configStore.config.vendors[idx].replayPolicy = replayPolicy
         } else {
@@ -207,6 +225,9 @@ struct VendorEditSheet: View {
                 readTimeoutSeconds: readTimeoutSeconds,
                 compatibleClientID: compatibleClientID,
                 supportedModels: normalizedSupportedModels,
+                supportsThinkingBlocks: supportsThinkingBlocks,
+                supportsAnthropicCountTokens: supportsAnthropicCountTokens,
+                repairsAnthropicToolCalls: repairsAnthropicToolCalls,
                 signingDomain: signingDomain,
                 replayPolicy: replayPolicy
             )
@@ -214,6 +235,31 @@ struct VendorEditSheet: View {
         }
         commitModelPrices()
         configStore.saveAndReload(proxyServer: proxyServer)
+    }
+
+    private var supportsAnthropicCountTokensBinding: Binding<Bool> {
+        Binding(
+            get: { supportsAnthropicCountTokens },
+            set: { newValue in
+                supportsAnthropicCountTokens = newValue
+                capabilityDefaultsManuallyEdited = true
+            }
+        )
+    }
+
+    private var repairsAnthropicToolCallsBinding: Binding<Bool> {
+        Binding(
+            get: { repairsAnthropicToolCalls },
+            set: { newValue in
+                repairsAnthropicToolCalls = newValue
+                capabilityDefaultsManuallyEdited = true
+            }
+        )
+    }
+
+    private func applyCapabilityDefaults(for baseURL: String) {
+        supportsAnthropicCountTokens = VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+        repairsAnthropicToolCalls = VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
     }
 
     private func modelPricePlaceholder(for index: Int, isInput: Bool = false, isOutput: Bool = false) -> String {

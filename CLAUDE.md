@@ -50,13 +50,14 @@ When encountering gray areas not covered by the plan: **ask user, don't improvis
 
 ```
 Prohibited:
-- Modifying API request/response content (pure proxy, no transformation)
+- Modifying API request/response content outside documented routing compatibility transforms
 - Storing or logging API request/response bodies
 - Listening on non-localhost interfaces
 
 Required:
 - All network I/O through SwiftNIO (not URLSession for the proxy server side)
 - Streaming (SSE) response relay must forward chunks immediately, no buffering
+- SSE response transforms must commit the same guarded/repaired content that is relayed to the client; add regression tests for both relay output and stored lineage data
 - API keys stored in ~/Library/Application Support/ModelProxy/config.json, not Keychain (simplicity for personal tool)
 - macOS 14+ (Sonoma) minimum deployment target
 ```

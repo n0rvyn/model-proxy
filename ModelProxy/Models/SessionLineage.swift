@@ -67,6 +67,7 @@ struct PreparedBranchContext: Sendable {
     let branchKey: String
     let clientName: String
     let sessionScopeKey: String?
+    let coordinationScopeKey: String?
     let vendorKey: String
     let signingDomain: SigningDomain
     let replayPolicy: TranscriptReplayPolicy
@@ -81,6 +82,7 @@ struct PreparedBranchContext: Sendable {
         branchKey: String,
         clientName: String,
         sessionScopeKey: String? = nil,
+        coordinationScopeKey: String? = nil,
         vendorKey: String,
         signingDomain: SigningDomain,
         replayPolicy: TranscriptReplayPolicy,
@@ -94,6 +96,7 @@ struct PreparedBranchContext: Sendable {
         self.branchKey = branchKey
         self.clientName = clientName
         self.sessionScopeKey = sessionScopeKey
+        self.coordinationScopeKey = coordinationScopeKey ?? sessionScopeKey
         self.vendorKey = vendorKey
         self.signingDomain = signingDomain
         self.replayPolicy = replayPolicy

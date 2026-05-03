@@ -7,9 +7,28 @@ struct NormalizedResponseBody: Sendable {
     let assistantTurn: PortableAssistantTurn?
 }
 
+struct SSEToolCallGuardSummary: Equatable {
+    let repairedCount: Int
+    let droppedCount: Int
+    let reasons: [String]
+
+    var changed: Bool {
+        repairedCount > 0 || droppedCount > 0
+    }
+}
+
 protocol PortableContentNormalizing: Sendable {
     nonisolated func normalizeJSONBody(_ data: Data) throws -> NormalizedResponseBody
-    nonisolated func makeSSEStreamNormalizer() -> PortableSSEStreamNormalizer
+    nonisolated func makeSSEStreamNormalizer(
+        portableMode: Bool,
+        toolCallGuard: ToolCallInputGuard?
+    ) -> PortableSSEStreamNormalizer
+}
+
+extension PortableContentNormalizing {
+    nonisolated func makeSSEStreamNormalizer() -> PortableSSEStreamNormalizer {
+        makeSSEStreamNormalizer(portableMode: true, toolCallGuard: nil)
+    }
 }
 
 struct PortableContentNormalizer: PortableContentNormalizing {
@@ -43,21 +62,40 @@ struct PortableContentNormalizer: PortableContentNormalizing {
         return NormalizedResponseBody(bodyData: normalizedData, assistantTurn: assistantTurn)
     }
 
-    nonisolated func makeSSEStreamNormalizer() -> PortableSSEStreamNormalizer {
-        PortableSSEStreamNormalizer(reducer: reducer)
+    nonisolated func makeSSEStreamNormalizer(
+        portableMode: Bool = true,
+        toolCallGuard: ToolCallInputGuard? = nil
+    ) -> PortableSSEStreamNormalizer {
+        PortableSSEStreamNormalizer(
+            reducer: reducer,
+            portableMode: portableMode,
+            toolCallGuard: toolCallGuard
+        )
     }
 }
 
 final class PortableSSEStreamNormalizer {
     private let reducer: any BranchMergeReducing
+    private let portableMode: Bool
+    private let toolCallGuard: ToolCallInputGuard?
     private var bufferedData = Data()
     private var activeBlocks: [Int: SSEContentBlockBuilder] = [:]
     private var visibleIndexMap: [Int: Int] = [:]
+    private var delayedToolUseIndexes: Set<Int> = []
     private var nextVisibleIndex = 0
     private var fullBlocksByIndex: [Int: [String: Any]] = [:]
+    private var guardRepairedCount = 0
+    private var guardDroppedCount = 0
+    private var guardReasons: [String] = []
 
-    nonisolated init(reducer: any BranchMergeReducing) {
+    nonisolated init(
+        reducer: any BranchMergeReducing,
+        portableMode: Bool = true,
+        toolCallGuard: ToolCallInputGuard? = nil
+    ) {
         self.reducer = reducer
+        self.portableMode = portableMode
+        self.toolCallGuard = toolCallGuard
     }
 
     func push(chunk: ByteBuffer) throws -> [Data] {
@@ -98,6 +136,14 @@ final class PortableSSEStreamNormalizer {
             "content": fullBlocks
         ]
         return try reducer.reduceAssistantMessage(message)
+    }
+
+    func toolCallGuardSummary() -> SSEToolCallGuardSummary {
+        SSEToolCallGuardSummary(
+            repairedCount: guardRepairedCount,
+            droppedCount: guardDroppedCount,
+            reasons: guardReasons
+        )
     }
 
     private func normalizeEvent(_ eventData: Data) throws -> Data? {
@@ -148,15 +194,27 @@ final class PortableSSEStreamNormalizer {
             "content": [block]
         ])["content"] as? [[String: Any]]
         let visibleBlock = normalizedBlock?.first ?? block
+        let isToolUse = (visibleBlock["type"] as? String)?.lowercased() == "tool_use"
 
         activeBlocks[originalIndex] = SSEContentBlockBuilder(block: visibleBlock)
-        if TranscriptProjector.isNonPortableBlock(visibleBlock) {
+        if portableMode, TranscriptProjector.isNonPortableBlock(visibleBlock) {
             return nil
         }
 
-        let visibleIndex = nextVisibleIndex
-        nextVisibleIndex += 1
+        let visibleIndex: Int
+        if portableMode {
+            visibleIndex = nextVisibleIndex
+            nextVisibleIndex += 1
+        } else {
+            visibleIndex = originalIndex
+        }
         visibleIndexMap[originalIndex] = visibleIndex
+
+        if toolCallGuard != nil, isToolUse {
+            delayedToolUseIndexes.insert(originalIndex)
+            return nil
+        }
+
         json["index"] = visibleIndex
         json["content_block"] = visibleBlock
         return try encodeEvent(name: eventName, json: json)
@@ -170,11 +228,16 @@ final class PortableSSEStreamNormalizer {
 
         activeBlocks[originalIndex]?.apply(delta: delta)
 
+        if delayedToolUseIndexes.contains(originalIndex) {
+            return nil
+        }
+
         guard let visibleIndex = visibleIndexMap[originalIndex] else {
             return nil
         }
 
         if let deltaType = (delta["type"] as? String)?.lowercased(),
+           portableMode,
            deltaType == "signature_delta" || deltaType.contains("thinking") || deltaType.contains("reasoning") {
             return nil
         }
@@ -190,6 +253,19 @@ final class PortableSSEStreamNormalizer {
 
         if let builder = activeBlocks.removeValue(forKey: originalIndex) {
             let finalized = builder.finalize()
+            if delayedToolUseIndexes.remove(originalIndex) != nil {
+                let guardedBlock = guardedToolUseBlock(from: finalized)
+                if let guardedBlock {
+                    fullBlocksByIndex[originalIndex] = guardedBlock
+                }
+                if let visibleIndex = visibleIndexMap[originalIndex] {
+                    visibleIndexMap.removeValue(forKey: originalIndex)
+                    guard let guardedBlock else { return nil }
+                    return try encodeGuardedBlockEvents(index: visibleIndex, block: guardedBlock)
+                }
+                return nil
+            }
+
             fullBlocksByIndex[originalIndex] = finalized
             if let visibleIndex = visibleIndexMap[originalIndex] {
                 json["index"] = visibleIndex
@@ -204,7 +280,13 @@ final class PortableSSEStreamNormalizer {
         for originalIndex in activeBlocks.keys.sorted() {
             guard let builder = activeBlocks.removeValue(forKey: originalIndex) else { continue }
             let finalized = builder.finalize()
-            fullBlocksByIndex[originalIndex] = finalized
+            if delayedToolUseIndexes.remove(originalIndex) != nil {
+                if let guardedBlock = guardedToolUseBlock(from: finalized) {
+                    fullBlocksByIndex[originalIndex] = guardedBlock
+                }
+            } else {
+                fullBlocksByIndex[originalIndex] = finalized
+            }
             visibleIndexMap.removeValue(forKey: originalIndex)
         }
     }
@@ -217,8 +299,108 @@ final class PortableSSEStreamNormalizer {
         bufferedData = Data()
         activeBlocks.removeAll(keepingCapacity: false)
         visibleIndexMap.removeAll(keepingCapacity: false)
+        delayedToolUseIndexes.removeAll(keepingCapacity: false)
         fullBlocksByIndex.removeAll(keepingCapacity: false)
         nextVisibleIndex = 0
+        guardRepairedCount = 0
+        guardDroppedCount = 0
+        guardReasons.removeAll(keepingCapacity: false)
+    }
+
+    private func encodeGuardedBlockEvents(index: Int, block: [String: Any]) throws -> Data? {
+        let blockType = (block["type"] as? String)?.lowercased()
+        switch blockType {
+        case "tool_use":
+            return try encodeToolUseEvents(index: index, block: block)
+        case "text":
+            return try encodeTextEvents(index: index, text: block["text"] as? String ?? "")
+        default:
+            break
+        }
+
+        var data = Data()
+        data.append(try encodeEvent(name: "content_block_start", json: [
+            "type": "content_block_start",
+            "index": index,
+            "content_block": block
+        ]))
+        data.append(try encodeEvent(name: "content_block_stop", json: [
+            "type": "content_block_stop",
+            "index": index
+        ]))
+        return data
+    }
+
+    private func guardedToolUseBlock(from block: [String: Any]) -> [String: Any]? {
+        guard let toolCallGuard else {
+            return block
+        }
+        let transformed = toolCallGuard.transformContentBlocks([block])
+        recordGuardTransform(transformed)
+        return transformed.blocks.first as? [String: Any]
+    }
+
+    private func recordGuardTransform(_ transformed: ToolCallInputGuard.TransformResult) {
+        guardRepairedCount += transformed.repairedCount
+        guardDroppedCount += transformed.droppedCount
+        for reason in transformed.reasons where !guardReasons.contains(reason) {
+            guardReasons.append(reason)
+        }
+    }
+
+    private func encodeToolUseEvents(index: Int, block: [String: Any]) throws -> Data {
+        let input = block["input"] ?? [:]
+        let inputData = (try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])) ?? Data("{}".utf8)
+        let inputText = String(data: inputData, encoding: .utf8) ?? "{}"
+        var data = Data()
+        data.append(try encodeEvent(name: "content_block_start", json: [
+            "type": "content_block_start",
+            "index": index,
+            "content_block": [
+                "type": "tool_use",
+                "id": block["id"] as? String ?? "",
+                "name": block["name"] as? String ?? "",
+                "input": [:]
+            ]
+        ]))
+        data.append(try encodeEvent(name: "content_block_delta", json: [
+            "type": "content_block_delta",
+            "index": index,
+            "delta": [
+                "type": "input_json_delta",
+                "partial_json": inputText
+            ]
+        ]))
+        data.append(try encodeEvent(name: "content_block_stop", json: [
+            "type": "content_block_stop",
+            "index": index
+        ]))
+        return data
+    }
+
+    private func encodeTextEvents(index: Int, text: String) throws -> Data {
+        var data = Data()
+        data.append(try encodeEvent(name: "content_block_start", json: [
+            "type": "content_block_start",
+            "index": index,
+            "content_block": [
+                "type": "text",
+                "text": ""
+            ]
+        ]))
+        data.append(try encodeEvent(name: "content_block_delta", json: [
+            "type": "content_block_delta",
+            "index": index,
+            "delta": [
+                "type": "text_delta",
+                "text": text
+            ]
+        ]))
+        data.append(try encodeEvent(name: "content_block_stop", json: [
+            "type": "content_block_stop",
+            "index": index
+        ]))
+        return data
     }
 
     private func encodeEvent(name: String?, json: [String: Any]) throws -> Data {
@@ -240,6 +422,9 @@ private struct SSEContentBlockBuilder {
     init(block: [String: Any]) {
         self.block = block
         if let input = block["input"] {
+            if let dictionary = input as? [String: Any], dictionary.isEmpty {
+                return
+            }
             if let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]),
                let text = String(data: data, encoding: .utf8) {
                 inputJSONBuffer = text

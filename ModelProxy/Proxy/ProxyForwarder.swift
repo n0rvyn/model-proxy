@@ -23,6 +23,15 @@ enum ProxyForwarder {
         }
     }
 
+    struct EffectiveTargetDecision: Sendable {
+        let target: RoutingSnapshot.RouteTarget
+        let bypassedVendorName: String?
+
+        var didBypass: Bool {
+            bypassedVendorName != nil
+        }
+    }
+
     static func forward(
         clientName: String,
         head: HTTPRequestHead,
@@ -41,8 +50,9 @@ enum ProxyForwarder {
         let requestID = String(UUID().uuidString.prefix(8))
         let startTime = Date.now
         let requestKind = requestKind(for: head.uri)
-        let sessionScopeKey = requestSessionScopeKey(
-            bodyData: body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data(),
+        let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
+        let requestScopes = requestScopeKeys(
+            bodyData: originalBodyData,
             clientName: clientName,
             channel: channel
         )
@@ -61,10 +71,10 @@ enum ProxyForwarder {
             return
         }
 
-        let target: RoutingSnapshot.RouteTarget
+        let resolvedTarget: RoutingSnapshot.RouteTarget
         switch resolveResult {
         case .routed(let t):
-            target = t
+            resolvedTarget = t
         case .blocked(let reason):
             AppLog.proxy.info("[Proxy] [\(requestID)] \(head.method.rawValue) \(head.uri) model=\(model) BLOCKED")
             let blockedEntry = TrafficEntry(
@@ -78,8 +88,18 @@ enum ProxyForwarder {
             return
         }
 
-        // 3. Preserve original body BEFORE model field replacement (needed for failover retry).
-        let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
+        let passthroughTarget = await router.passthroughTarget(originalAPIKey: originalAPIKey)
+        let targetDecision = Self.effectiveTarget(
+            for: requestKind,
+            resolvedTarget: resolvedTarget,
+            passthroughTarget: passthroughTarget
+        )
+        let target = targetDecision.target
+        if let bypassedVendorName = targetDecision.bypassedVendorName {
+            AppLog.proxy.info(
+                "[Proxy] [\(requestID)] count_tokens bypass vendor=\(bypassedVendorName) defaultUpstream=\(target.baseURL)"
+            )
+        }
 
         // Log request routing (no API keys or body content).
         let routeType = target.isPassthrough ? "passthrough" : "mapped → \(target.vendorName)"
@@ -103,7 +123,8 @@ enum ProxyForwarder {
             initialPreparedRequest = try await lineageBroker.prepareRequest(
                 bodyData: originalBodyData,
                 clientName: clientName,
-                sessionScopeKey: sessionScopeKey,
+                sessionScopeKey: requestScopes.sessionScopeKey,
+                coordinationScopeKey: requestScopes.coordinationScopeKey,
                 target: target
             )
         } catch {
@@ -173,7 +194,8 @@ enum ProxyForwarder {
                     preparedRequest = try await lineageBroker.prepareRequest(
                         bodyData: originalBodyData,
                         clientName: clientName,
-                        sessionScopeKey: sessionScopeKey,
+                        sessionScopeKey: requestScopes.sessionScopeKey,
+                        coordinationScopeKey: requestScopes.coordinationScopeKey,
                         target: target
                     )
                 } catch {
@@ -189,6 +211,48 @@ enum ProxyForwarder {
                     )
                 }
                 continue
+            case .leaderFailed(let source, let replay):
+                AppLog.proxy.warning(
+                    "[Proxy] [\(requestID)] CoordinatorDiag: action=leader_failed sourceGeneration=\(source.generation) lineage=\(source.lineageKey) branch=\(source.branchKey) sourceHashes=\(source.portableMessageHashes.count) targetHashes=\(context.preparedPortableMessageHashes.count) status=\(replay?.statusCode ?? 0)"
+                )
+                if let replay {
+                    await ResponseRelay.replay(
+                        cachedResponse: replay,
+                        to: channel,
+                        requestID: requestID
+                    )
+                    let duration = Date.now.timeIntervalSince(startTime)
+                    let entryRouteType: TrafficEntry.RouteType = target.isPassthrough
+                        ? .passthrough
+                        : .mapped(targetModel: target.targetModel ?? model)
+                    let entry = TrafficEntry(
+                        model: model,
+                        routeType: entryRouteType,
+                        requestKind: requestKind,
+                        httpStatus: replay.statusCode,
+                        duration: duration
+                    )
+                    await MainActor.run { trafficLog.append(entry) }
+                } else {
+                    await Self.sendError(
+                        channel: channel,
+                        status: .conflict,
+                        message: "Prior branch request failed before committing vendor history"
+                    )
+                    let duration = Date.now.timeIntervalSince(startTime)
+                    let entryRouteType: TrafficEntry.RouteType = target.isPassthrough
+                        ? .passthrough
+                        : .mapped(targetModel: target.targetModel ?? model)
+                    let entry = TrafficEntry(
+                        model: model,
+                        routeType: entryRouteType,
+                        requestKind: requestKind,
+                        httpStatus: 409,
+                        duration: duration
+                    )
+                    await MainActor.run { trafficLog.append(entry) }
+                }
+                return
             }
             break
         }
@@ -327,6 +391,7 @@ enum ProxyForwarder {
         if !target.isPassthrough {
             forwardBodyData = Self.sanitizeToolsForVendor(in: forwardBodyData)
         }
+        let toolCatalog = ToolCallInputGuard.ToolCatalog.fromRequestBody(forwardBodyData)
 
         // 4. Build and send upstream request.
         let (upstreamResponse, usedTarget) = await Self.executeWithFailover(
@@ -375,6 +440,7 @@ enum ProxyForwarder {
         nonisolated(unsafe) var capturedOutputTokens: Int?
 
         let sourceModelForStats: String? = usedTarget.isPassthrough ? nil : model
+        let toolCallGuard = Self.toolCallGuard(for: usedTarget, catalog: toolCatalog)
 
         let vendorID = usedTarget.vendorID
         let onUsage: ResponseRelay.UsageCallback = { [tokenStatsStore] input, output in
@@ -402,6 +468,7 @@ enum ProxyForwarder {
             branchContext: preparedRequest.context,
             branchLease: branchLease,
             portableNormalizer: portableNormalizer,
+            toolCallGuard: toolCallGuard,
             lineageBroker: lineageBroker,
             requestCoordinator: requestCoordinator
         )
@@ -434,6 +501,29 @@ enum ProxyForwarder {
         }
     }
 
+    static func effectiveTarget(
+        for requestKind: TrafficEntry.RequestKind,
+        resolvedTarget: RoutingSnapshot.RouteTarget,
+        passthroughTarget: RoutingSnapshot.RouteTarget
+    ) -> EffectiveTargetDecision {
+        guard requestKind == .countTokens,
+              !resolvedTarget.isPassthrough,
+              !resolvedTarget.supportsAnthropicCountTokens else {
+            return EffectiveTargetDecision(target: resolvedTarget, bypassedVendorName: nil)
+        }
+        return EffectiveTargetDecision(
+            target: passthroughTarget,
+            bypassedVendorName: resolvedTarget.vendorName
+        )
+    }
+
+    static func toolCallGuard(
+        for target: RoutingSnapshot.RouteTarget,
+        catalog: ToolCallInputGuard.ToolCatalog
+    ) -> ToolCallInputGuard? {
+        target.repairsAnthropicToolCalls ? ToolCallInputGuard(catalog: catalog) : nil
+    }
+
     private static func collectResponseBody(_ response: HTTPClientResponse) async throws -> Data {
         var data = Data()
         for try await chunk in response.body {
@@ -444,16 +534,28 @@ enum ProxyForwarder {
         return data
     }
 
-    private static func requestSessionScopeKey(
+    private struct RequestScopeKeys {
+        let sessionScopeKey: String?
+        let coordinationScopeKey: String?
+    }
+
+    private static func requestScopeKeys(
         bodyData: Data,
         clientName: String,
         channel: any Channel
-    ) -> String {
+    ) -> RequestScopeKeys {
         if let explicit = explicitSessionScopeKey(from: bodyData) {
-            return "\(clientName)|explicit|\(explicit)"
+            let explicitScopeKey = "\(clientName)|explicit|\(explicit)"
+            return RequestScopeKeys(
+                sessionScopeKey: explicitScopeKey,
+                coordinationScopeKey: explicitScopeKey
+            )
         }
         let channelIdentity = ObjectIdentifier(channel as AnyObject)
-        return "\(clientName)|channel|\(channelIdentity)"
+        return RequestScopeKeys(
+            sessionScopeKey: nil,
+            coordinationScopeKey: "\(clientName)|channel|\(channelIdentity)"
+        )
     }
 
     private static func explicitSessionScopeKey(from bodyData: Data) -> String? {
@@ -959,6 +1061,10 @@ enum ProxyForwarder {
         case .waited(let source):
             AppLog.proxy.debug(
                 "[Proxy] [\(requestID)] CoordinatorDiag: action=waited onGeneration=\(source.generation) lineage=\(source.lineageKey) branch=\(source.branchKey) sourceHashes=\(source.portableMessageHashes.count) targetHashes=\(context.preparedPortableMessageHashes.count)"
+            )
+        case .leaderFailed(let source, let replay):
+            AppLog.proxy.warning(
+                "[Proxy] [\(requestID)] CoordinatorDiag: action=leader_failed sourceGeneration=\(source.generation) lineage=\(source.lineageKey) branch=\(source.branchKey) sourceHashes=\(source.portableMessageHashes.count) targetHashes=\(context.preparedPortableMessageHashes.count) status=\(replay?.statusCode ?? 0)"
             )
         }
     }

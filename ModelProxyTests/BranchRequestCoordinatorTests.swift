@@ -72,6 +72,40 @@ struct BranchRequestCoordinatorTests {
         #expect(successorLease.generation == leaderLease.generation + 1)
     }
 
+    @Test func successorRequestReceivesLeaderFailureInsteadOfAcquiringAfterUpstreamError() async throws {
+        let coordinator = BranchRequestCoordinator()
+        let leaderContext = makeContext(hashes: ["m1", "m2"])
+        let successorContext = makeContext(hashes: ["m1", "m2", "m3"])
+
+        let leaderDecision = await coordinator.acquire(context: leaderContext)
+        let leaderLease = switch leaderDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected leader lease acquisition"); throw TestAbort()
+        }
+
+        let successorTask = Task {
+            await coordinator.acquire(context: successorContext)
+        }
+        await Task.yield()
+
+        let upstreamError = ReplayableBranchResponse(
+            statusCode: 400,
+            headers: [("content-type", "application/json")],
+            bodyChunks: [Data("{\"error\":\"invalid params\"}".utf8)]
+        )
+        await coordinator.complete(lease: leaderLease, replay: upstreamError)
+
+        let followerDecision = await successorTask.value
+        switch followerDecision {
+        case .leaderFailed(let source, let replay):
+            #expect(source == leaderLease)
+            #expect(replay?.statusCode == upstreamError.statusCode)
+            #expect(replay?.bodyChunks == upstreamError.bodyChunks)
+        default:
+            Issue.record("Expected leaderFailed decision"); throw TestAbort()
+        }
+    }
+
     @Test func staleGenerationFailsCommitCheckAfterNewerAcquire() async throws {
         let coordinator = BranchRequestCoordinator()
         let context = makeContext(hashes: ["m1"])
@@ -144,6 +178,32 @@ struct BranchRequestCoordinatorTests {
         await coordinator.complete(lease: secondLease, replay: nil)
     }
 
+    @Test func samePortableHashesFromDifferentCoordinationScopesDoNotBlockEachOther() async throws {
+        let coordinator = BranchRequestCoordinator()
+        let channelAContext = makeContext(coordinationScopeKey: "Claude Code|channel|a", hashes: ["m1", "m2"])
+        let channelBContext = makeContext(coordinationScopeKey: "Claude Code|channel|b", hashes: ["m1", "m2"])
+
+        let firstDecision = await coordinator.acquire(context: channelAContext)
+        let firstLease = switch firstDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected first lease acquisition"); throw TestAbort()
+        }
+
+        let secondDecision = await coordinator.acquire(context: channelBContext)
+        let secondLease = switch secondDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected second lease acquisition"); throw TestAbort()
+        }
+
+        #expect(firstLease.sessionScopeKey == nil)
+        #expect(firstLease.coordinationScopeKey == "Claude Code|channel|a")
+        #expect(secondLease.coordinationScopeKey == "Claude Code|channel|b")
+        #expect(secondLease.generation == 1)
+
+        await coordinator.complete(lease: firstLease, replay: nil)
+        await coordinator.complete(lease: secondLease, replay: nil)
+    }
+
     @Test func replayResponseHeadersCanBeAssertedWithoutOrderSensitivity() async throws {
         let coordinator = BranchRequestCoordinator()
         let context = makeContext(hashes: ["m1"])
@@ -183,6 +243,7 @@ struct BranchRequestCoordinatorTests {
 private func makeContext(
     clientName: String = "Claude Code",
     sessionScopeKey: String? = nil,
+    coordinationScopeKey: String? = nil,
     hashes: [String]
 ) -> PreparedBranchContext {
     PreparedBranchContext(
@@ -190,6 +251,7 @@ private func makeContext(
         branchKey: "branch-1",
         clientName: clientName,
         sessionScopeKey: sessionScopeKey,
+        coordinationScopeKey: coordinationScopeKey,
         vendorKey: "vendor-qwen",
         signingDomain: .compatibleThirdParty,
         replayPolicy: .portableOnly,

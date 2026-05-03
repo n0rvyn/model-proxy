@@ -16,6 +16,7 @@ struct BranchRequestLease: Sendable, Equatable {
     let id: UUID
     let clientName: String
     let sessionScopeKey: String?
+    let coordinationScopeKey: String?
     let vendorKey: String
     let lineageKey: String
     let branchKey: String
@@ -27,6 +28,7 @@ enum BranchRequestAcquireDecision: Sendable {
     case acquired(BranchRequestLease)
     case replay(ReplayableBranchResponse, source: BranchRequestLease)
     case waited(on: BranchRequestLease)
+    case leaderFailed(source: BranchRequestLease, replay: ReplayableBranchResponse?)
 }
 
 private enum JoinedBranchRequestOutcome: Sendable {
@@ -34,12 +36,17 @@ private enum JoinedBranchRequestOutcome: Sendable {
     case retry
 }
 
+private enum ReleasedBranchRequestOutcome: Sendable {
+    case completed
+    case failed(ReplayableBranchResponse?)
+}
+
 actor BranchRequestCoordinator: BranchRequestCoordinating {
     private struct InFlightEntry {
         let lease: BranchRequestLease
         let scopeKey: String
         var joinWaiters: [CheckedContinuation<JoinedBranchRequestOutcome, Never>]
-        var releaseWaiters: [CheckedContinuation<Void, Never>]
+        var releaseWaiters: [CheckedContinuation<ReleasedBranchRequestOutcome, Never>]
     }
 
     private var entries: [UUID: InFlightEntry] = [:]
@@ -59,15 +66,20 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
         }
 
         if let blockingEntry = blockingEntry(for: context) {
-            await withCheckedContinuation { continuation in
+            let outcome = await withCheckedContinuation { continuation in
                 entries[blockingEntry.lease.id]?.releaseWaiters.append(continuation)
             }
-            return .waited(on: blockingEntry.lease)
+            switch outcome {
+            case .completed:
+                return .waited(on: blockingEntry.lease)
+            case .failed(let replay):
+                return .leaderFailed(source: blockingEntry.lease, replay: replay)
+            }
         }
 
         let scopeKey = scopeKey(
             clientName: context.clientName,
-            sessionScopeKey: context.sessionScopeKey,
+            coordinationScopeKey: context.coordinationScopeKey,
             vendorKey: context.vendorKey,
             branchKey: context.branchKey
         )
@@ -78,6 +90,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
             id: UUID(),
             clientName: context.clientName,
             sessionScopeKey: context.sessionScopeKey,
+            coordinationScopeKey: context.coordinationScopeKey,
             vendorKey: context.vendorKey,
             lineageKey: context.lineageKey,
             branchKey: context.branchKey,
@@ -97,11 +110,16 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
         guard let entry = entries.removeValue(forKey: lease.id) else { return }
 
         let joinOutcome = replay.map(JoinedBranchRequestOutcome.replay) ?? .retry
+        let releaseOutcome: ReleasedBranchRequestOutcome = if let replay, replay.statusCode >= 400 {
+            .failed(replay)
+        } else {
+            .completed
+        }
         for waiter in entry.joinWaiters {
             waiter.resume(returning: joinOutcome)
         }
         for waiter in entry.releaseWaiters {
-            waiter.resume()
+            waiter.resume(returning: releaseOutcome)
         }
     }
 
@@ -112,7 +130,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
     private func exactEntry(for context: PreparedBranchContext) -> InFlightEntry? {
         entries.values.first { entry in
             entry.lease.clientName == context.clientName
-            && entry.lease.sessionScopeKey == context.sessionScopeKey
+            && entry.lease.coordinationScopeKey == context.coordinationScopeKey
             && entry.lease.vendorKey == context.vendorKey
             && entry.lease.portableMessageHashes == context.preparedPortableMessageHashes
         }
@@ -122,7 +140,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
         entries.values
             .filter { entry in
                 entry.lease.clientName == context.clientName
-                && entry.lease.sessionScopeKey == context.sessionScopeKey
+                && entry.lease.coordinationScopeKey == context.coordinationScopeKey
                 && entry.lease.vendorKey == context.vendorKey
                 && sharesBranchLineage(
                     lhs: entry.lease.portableMessageHashes,
@@ -146,7 +164,7 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
     private func scopeKey(for lease: BranchRequestLease) -> String {
         scopeKey(
             clientName: lease.clientName,
-            sessionScopeKey: lease.sessionScopeKey,
+            coordinationScopeKey: lease.coordinationScopeKey,
             vendorKey: lease.vendorKey,
             branchKey: lease.branchKey
         )
@@ -154,10 +172,10 @@ actor BranchRequestCoordinator: BranchRequestCoordinating {
 
     private func scopeKey(
         clientName: String,
-        sessionScopeKey: String?,
+        coordinationScopeKey: String?,
         vendorKey: String,
         branchKey: String
     ) -> String {
-        "\(clientName)|\(sessionScopeKey ?? "none")|\(vendorKey)|\(branchKey)"
+        "\(clientName)|\(coordinationScopeKey ?? "none")|\(vendorKey)|\(branchKey)"
     }
 }

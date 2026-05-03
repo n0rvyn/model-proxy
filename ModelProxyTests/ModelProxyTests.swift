@@ -62,12 +62,14 @@ struct ModelProxyTests {
             name: "DashScope",
             baseURL: "https://dashscope.aliyuncs.com/compatible-mode",
             apiKey: "key",
-            supportedModels: ["qwen-plus", "qwen-max"]
+            supportedModels: ["qwen-plus", "qwen-max"],
+            supportsThinkingBlocks: true
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(Vendor.self, from: data)
         #expect(decoded == original)
         #expect(decoded.supportedModels == ["qwen-plus", "qwen-max"])
+        #expect(decoded.supportsThinkingBlocks == true)
     }
 
     // MARK: - Vendor legacy JSON (no timeout/compatibleClientID fields)
@@ -86,8 +88,57 @@ struct ModelProxyTests {
         #expect(decoded.readTimeoutSeconds == 120)
         #expect(decoded.compatibleClientID == nil)
         #expect(decoded.supportedModels.isEmpty)
+        #expect(decoded.supportsThinkingBlocks == false)
+        #expect(decoded.supportsAnthropicCountTokens == true)
+        #expect(decoded.repairsAnthropicToolCalls == false)
         #expect(decoded.signingDomain == .compatibleThirdParty)
         #expect(decoded.replayPolicy == .portableOnly)
+    }
+
+    @Test func vendorDecodesLegacyDeepSeekCapabilitiesFromBaseURL() throws {
+        let legacyJSON = """
+        {
+            "id": "00000000-0000-0000-0000-0000000000D5",
+            "name": "DeepSeek",
+            "baseURL": "https://api.deepseek.com/anthropic",
+            "apiKey": "test-key"
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Vendor.self, from: legacyJSON)
+        #expect(decoded.supportsAnthropicCountTokens == false)
+        #expect(decoded.repairsAnthropicToolCalls == true)
+    }
+
+    @Test func vendorExplicitCapabilityValuesOverrideDeepSeekInference() throws {
+        let json = """
+        {
+            "id": "00000000-0000-0000-0000-0000000000D6",
+            "name": "DeepSeek",
+            "baseURL": "https://api.deepseek.com/anthropic",
+            "apiKey": "test-key",
+            "supportsAnthropicCountTokens": true,
+            "repairsAnthropicToolCalls": false
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Vendor.self, from: json)
+        #expect(decoded.supportsAnthropicCountTokens == true)
+        #expect(decoded.repairsAnthropicToolCalls == false)
+    }
+
+    @Test func vendorCapabilityRoundTrip() throws {
+        let original = Vendor(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000000D7")!,
+            name: "Custom",
+            baseURL: "https://custom.example.com/anthropic",
+            apiKey: "key",
+            supportsAnthropicCountTokens: false,
+            repairsAnthropicToolCalls: true
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(Vendor.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.supportsAnthropicCountTokens == false)
+        #expect(decoded.repairsAnthropicToolCalls == true)
     }
 
     // MARK: - ClientConfig round-trip
@@ -220,6 +271,9 @@ struct ModelProxyTests {
         #expect(target.targetModel == "qwen-turbo")
         #expect(target.signingDomain == .compatibleThirdParty)
         #expect(target.replayPolicy == .portableOnly)
+        #expect(target.supportsThinkingBlocks == false)
+        #expect(target.supportsAnthropicCountTokens == true)
+        #expect(target.repairsAnthropicToolCalls == false)
     }
 
     // MARK: - RoutingSnapshot: unmapped model passthrough
@@ -240,6 +294,9 @@ struct ModelProxyTests {
         #expect(target.targetModel == nil)
         #expect(target.signingDomain == .anthropicOfficial)
         #expect(target.replayPolicy == .transparent)
+        #expect(target.supportsThinkingBlocks == true)
+        #expect(target.supportsAnthropicCountTokens == true)
+        #expect(target.repairsAnthropicToolCalls == false)
     }
 
     // MARK: - RoutingSnapshot: different client uses different defaultUpstream
@@ -289,6 +346,42 @@ struct ModelProxyTests {
         #expect(target.baseURL == "https://fallback.example.com")
         #expect(target.apiKey == "fallback-test-key")
         #expect(target.targetModel == nil) // keeps original model name
+        #expect(target.supportsThinkingBlocks == false)
+        #expect(target.supportsAnthropicCountTokens == true)
+        #expect(target.repairsAnthropicToolCalls == false)
+    }
+
+    @Test func routingSnapshotRouteAllUnmappedModelUsesFallbackTargetModel() {
+        let vendor = Vendor(
+            name: "Fallback",
+            baseURL: "https://fallback.example.com",
+            apiKey: "fallback-test-key",
+            supportedModels: ["deepseek-v4-pro"],
+            supportsThinkingBlocks: true,
+            supportsAnthropicCountTokens: false,
+            repairsAnthropicToolCalls: true
+        )
+        let client = ClientConfig(
+            clientName: "Claude Code",
+            port: 8080,
+            defaultUpstream: "https://api.anthropic.com",
+            unmappedPolicy: .routeAll,
+            fallbackVendorID: vendor.id,
+            fallbackTargetModel: "deepseek-v4-pro"
+        )
+        let config = AppConfig(vendors: [vendor], clients: [client], modelMappings: [])
+        let snapshot = RoutingSnapshot(from: config, for: client)
+
+        let (result, _) = snapshot.resolve(model: "claude-opus-4-6", originalAPIKey: "my-key")
+        guard case .routed(let target) = result else {
+            Issue.record("Expected .routed, got \(result)")
+            return
+        }
+        #expect(!target.isPassthrough)
+        #expect(target.targetModel == "deepseek-v4-pro")
+        #expect(target.supportsThinkingBlocks == true)
+        #expect(target.supportsAnthropicCountTokens == false)
+        #expect(target.repairsAnthropicToolCalls == true)
     }
 
     // MARK: - Legacy JSON decodes unmappedPolicy as .passthrough
@@ -456,7 +549,14 @@ struct ModelProxyTests {
     @Test func routingSnapshotWithBackupTargetResolvesCorrectly() {
         let client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
         let primaryVendor = Vendor(name: "Primary", baseURL: "https://primary.example.com", apiKey: "pk")
-        let backupVendor = Vendor(name: "Backup", baseURL: "https://backup.example.com", apiKey: "bk")
+        let backupVendor = Vendor(
+            name: "Backup",
+            baseURL: "https://backup.example.com",
+            apiKey: "bk",
+            supportsThinkingBlocks: true,
+            supportsAnthropicCountTokens: false,
+            repairsAnthropicToolCalls: true
+        )
         let mapping = ModelMapping(
             sourceModel: "test-model", targetModel: "primary-model",
             targetVendorID: primaryVendor.id,
@@ -485,6 +585,9 @@ struct ModelProxyTests {
         }
         #expect(target2.vendorName == "Backup")
         #expect(target2.targetModel == "backup-model")
+        #expect(target2.supportsThinkingBlocks == true)
+        #expect(target2.supportsAnthropicCountTokens == false)
+        #expect(target2.repairsAnthropicToolCalls == true)
     }
 
     // MARK: - RouteState: failCount threshold switches activeTarget

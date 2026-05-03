@@ -23,6 +23,7 @@ enum ResponseRelay {
         branchContext: PreparedBranchContext? = nil,
         branchLease: BranchRequestLease? = nil,
         portableNormalizer: (any PortableContentNormalizing)? = nil,
+        toolCallGuard: ToolCallInputGuard? = nil,
         lineageBroker: (any SessionLineageBrokering)? = nil,
         requestCoordinator: (any BranchRequestCoordinating)? = nil
     ) async -> ReplayableBranchResponse? {
@@ -44,6 +45,8 @@ enum ResponseRelay {
         let statusCode = Int(upstreamResponse.status.code)
         let isError = statusCode >= 400
         let shouldNormalize = branchContext != nil && portableNormalizer != nil && !isError
+        let shouldGuardToolCalls = toolCallGuard != nil && !isError
+        let shouldTransformBody = shouldNormalize || shouldGuardToolCalls
         let shouldCaptureReplay = branchLease != nil
         let replayHeaders = responseHead.headers.map { ($0.name, $0.value) }
         var replayRecorder = BranchReplayRecorder(statusCode: statusCode, headers: replayHeaders)
@@ -60,7 +63,12 @@ enum ResponseRelay {
                 var accumulatedInput = 0
                 var accumulatedOutput = 0
                 var errorAccumulator = Data()
-                let streamNormalizer = shouldNormalize ? portableNormalizer?.makeSSEStreamNormalizer() : nil
+                let streamNormalizer = shouldTransformBody
+                    ? (portableNormalizer ?? PortableContentNormalizer()).makeSSEStreamNormalizer(
+                        portableMode: shouldNormalize,
+                        toolCallGuard: shouldGuardToolCalls ? toolCallGuard : nil
+                    )
+                    : nil
                 for try await chunk in upstreamResponse.body {
                     if let streamNormalizer {
                         let normalizedEvents = try streamNormalizer.push(chunk: chunk)
@@ -112,6 +120,16 @@ enum ResponseRelay {
                 if isError, !errorAccumulator.isEmpty {
                     let preview = String(data: errorAccumulator.prefix(2048), encoding: .utf8) ?? "<non-UTF8, \(errorAccumulator.count)B>"
                     AppLog.proxy.warning("[Proxy] [\(requestID)] Upstream \(statusCode) body (\(errorAccumulator.count)B): \(preview)")
+                    logUpstreamErrorBranchContext(branchContext, requestID: requestID)
+                }
+                if let streamNormalizer {
+                    let guardSummary = streamNormalizer.toolCallGuardSummary()
+                    if guardSummary.changed {
+                        let reasons = guardSummary.reasons.joined(separator: ",")
+                        AppLog.proxy.info(
+                            "[Proxy] [\(requestID)] ToolCallGuard: repaired=\(guardSummary.repairedCount) dropped=\(guardSummary.droppedCount) parseFailed=false reasons=\(reasons)"
+                        )
+                    }
                 }
                 if let streamNormalizer,
                    let branchContext,
@@ -131,13 +149,13 @@ enum ResponseRelay {
                 // for token usage extraction. This doubles peak memory for the response body,
                 // but most API responses are small enough that this is acceptable.
                 var bodyAccumulator = Data()
-                let shouldAccumulate = onUsage != nil || isError || shouldNormalize
+                let shouldAccumulate = onUsage != nil || isError || shouldTransformBody
 
                 for try await chunk in upstreamResponse.body {
                     if shouldAccumulate {
                         if let bytes = chunk.getData(at: chunk.readerIndex, length: chunk.readableBytes) {
                             bodyAccumulator.append(bytes)
-                            if !shouldNormalize {
+                            if !shouldTransformBody {
                                 Self.recordReplayChunk(
                                     bytes,
                                     shouldCaptureReplay: shouldCaptureReplay,
@@ -149,7 +167,7 @@ enum ResponseRelay {
                             }
                         }
                     }
-                    if !shouldNormalize {
+                    if !shouldTransformBody {
                         try await channel.writeAndFlush(
                             NIOAny(HTTPServerResponsePart.body(.byteBuffer(chunk)))
                         ).get()
@@ -165,12 +183,25 @@ enum ResponseRelay {
                 if isError, !bodyAccumulator.isEmpty {
                     let preview = String(data: bodyAccumulator.prefix(2048), encoding: .utf8) ?? "<non-UTF8, \(bodyAccumulator.count)B>"
                     AppLog.proxy.warning("[Proxy] [\(requestID)] Upstream \(statusCode) body (\(bodyAccumulator.count)B): \(preview)")
+                    logUpstreamErrorBranchContext(branchContext, requestID: requestID)
                 }
+                var transformedBody = bodyAccumulator
+                if shouldGuardToolCalls, let toolCallGuard, !transformedBody.isEmpty {
+                    let guarded = toolCallGuard.transformJSONResponseBody(transformedBody)
+                    transformedBody = guarded.data
+                    if guarded.changed || guarded.parseFailed {
+                        let reasons = guarded.reasons.joined(separator: ",")
+                        AppLog.proxy.info(
+                            "[Proxy] [\(requestID)] ToolCallGuard: repaired=\(guarded.repairedCount) dropped=\(guarded.droppedCount) parseFailed=\(guarded.parseFailed) reasons=\(reasons)"
+                        )
+                    }
+                }
+
                 if shouldNormalize,
                    let portableNormalizer,
                    let branchContext,
                    let lineageBroker {
-                    let normalized = try portableNormalizer.normalizeJSONBody(bodyAccumulator)
+                    let normalized = try portableNormalizer.normalizeJSONBody(transformedBody)
                     Self.replaceReplayBody(
                         normalized.bodyData,
                         shouldCaptureReplay: shouldCaptureReplay,
@@ -194,6 +225,20 @@ enum ResponseRelay {
                             requestID: requestID
                         )
                     }
+                } else if shouldTransformBody {
+                    Self.replaceReplayBody(
+                        transformedBody,
+                        shouldCaptureReplay: shouldCaptureReplay,
+                        requestID: requestID,
+                        statusCode: statusCode,
+                        replayRecorder: &replayRecorder,
+                        replayOverflowLogged: &replayOverflowLogged
+                    )
+                    var out = channel.allocator.buffer(capacity: transformedBody.count)
+                    out.writeBytes(transformedBody)
+                    try await channel.writeAndFlush(
+                        NIOAny(HTTPServerResponsePart.body(.byteBuffer(out)))
+                    ).get()
                 }
             }
 
@@ -373,5 +418,12 @@ enum ResponseRelay {
         } catch {
             AppLog.proxy.error("[Proxy] [\(requestID)] branchCommitFailed lineage=\(branchContext.lineageKey) branch=\(branchContext.branchKey) error=\(String(describing: error))")
         }
+    }
+
+    private static func logUpstreamErrorBranchContext(_ branchContext: PreparedBranchContext?, requestID: String) {
+        guard let branchContext else { return }
+        AppLog.proxy.warning(
+            "[Proxy] [\(requestID)] UpstreamErrorDiag: lineage=\(branchContext.lineageKey) branch=\(branchContext.branchKey) vendor=\(branchContext.vendorKey) replay=\(branchContext.replayPolicy.rawValue) reused=\(branchContext.reusedBranchHistory) reusedPortable=\(branchContext.reusedPortableMessageCount) hashes=\(branchContext.preparedPortableMessageHashes.count)"
+        )
     }
 }

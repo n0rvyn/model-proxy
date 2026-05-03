@@ -114,6 +114,8 @@ Disables branch tracking entirely. Unsigned thinking leaks to Anthropic in cross
 
 Requires user configuration. Doesn't solve cross-vendor contamination.
 
+**2026-05-03 update:** Accepted as an additional vendor capability guard, not as the standalone fix. The response-to-client rule remains unchanged, so third-party thinking still does not leak to clients. The new capability only controls whether request projection sends `thinking` blocks to a portable third-party vendor.
+
 ### D. Replace stripped thinking with empty markers
 
 Hacky. Vendors may not accept empty thinking blocks.
@@ -125,3 +127,21 @@ Requires JSON re-serialization → corrupts valid Anthropic signatures. **Proven
 ## Implementation
 
 See `docs/06-plans/2026-03-29-thinking-block-request-only-fix-plan.md`
+
+## Addendum: DeepSeek Anthropic API Thinking Capability (2026-05-03)
+
+DeepSeek's Anthropic-compatible API at `https://api.deepseek.com/anthropic` documents top-level `thinking` support and `content` array `type="thinking"` support. It documents `redacted_thinking` as unsupported.
+
+Observed error from ModelProxy logs on 2026-05-03 10:10:18 +0800:
+
+```
+The `content[].thinking` in the thinking mode must be passed back to the API.
+```
+
+The evidence shows DeepSeek needs the request-side branch replay behavior from this ADR when tool results continue a thinking-mode assistant turn. The regression risk is that other Anthropic-compatible vendors reject `thinking`. ModelProxy now records this as a vendor capability:
+
+- `supportsThinkingBlocks == true`: request projection can include vendor-ready `thinking` blocks with `signature` stripped.
+- `supportsThinkingBlocks == false`: request projection strips `thinking`, `redacted_thinking`, and reasoning-like blocks from both the current suffix and restored branch history.
+- Legacy vendors and newly created vendors default this capability to `false`; users explicitly enable it for DeepSeek and other vendors that document support.
+
+The branch reuse scope also changed. Persistent replay scope is no longer derived from the TCP channel when the client body has no explicit session field. TCP channel identity is kept only as coordination scope for in-flight request blocking. This keeps Claude Code connection changes from losing stored vendor-local thinking history while preserving coordination isolation for simultaneous requests.

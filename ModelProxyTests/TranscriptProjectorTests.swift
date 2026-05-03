@@ -16,7 +16,8 @@ struct TranscriptProjectorTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let request = try makeAnthropicRequestJSON(messages: [
@@ -58,6 +59,48 @@ struct TranscriptProjectorTests {
         #expect(prepared.context != nil)
     }
 
+    @Test func vendorReadyRequestStripsThinkingWhenVendorDoesNotSupportThinkingBlocks() throws {
+        let projector = TranscriptProjector()
+        let target = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.example.com/anthropic",
+            apiKey: "key",
+            vendorName: "StrictVendor",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000D1"),
+            targetModel: "strict-model",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: false
+        )
+
+        let request = try makeAnthropicRequestJSON(messages: [
+            ["role": "assistant", "content": [
+                ["type": "thinking", "thinking": "secret", "signature": "sig_1"],
+                ["type": "redacted_thinking", "data": "opaque"],
+                ["type": "reasoning", "reasoning": "private"],
+                ["type": "text", "text": "Visible text"]
+            ]],
+            ["role": "user", "content": "Continue"]
+        ])
+
+        let prepared = try projector.prepareRequest(
+            bodyData: request,
+            clientName: "Claude Code",
+            target: target,
+            existingBranches: [],
+            fingerprint: ConversationFingerprint()
+        )
+
+        let json = try jsonObject(prepared.bodyData)
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let assistantBlocks = try #require(messages.first?["content"] as? [[String: Any]])
+        let blockTypes = Set(assistantBlocks.compactMap { $0["type"] as? String })
+        #expect(blockTypes == ["text"])
+        #expect(!assistantBlocks.contains { $0["thinking"] != nil || $0["redacted_thinking"] != nil })
+    }
+
     @Test func portableRequestRehydratesVendorLocalBranchHistory() throws {
         let projector = TranscriptProjector()
         let fingerprint = ConversationFingerprint()
@@ -71,7 +114,8 @@ struct TranscriptProjectorTests {
             connectTimeoutSeconds: 10,
             readTimeoutSeconds: 120,
             signingDomain: .compatibleThirdParty,
-            replayPolicy: .portableOnly
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: true
         )
 
         let fullMessages: [[String: Any]] = [
@@ -118,6 +162,70 @@ struct TranscriptProjectorTests {
         #expect(prepared.context?.branchKey == "branch-1")
         #expect(prepared.context?.reusedBranchHistory == true)
         #expect(prepared.context?.reusedPortableMessageCount == 2)
+    }
+
+    @Test func portableRequestDoesNotRehydrateThinkingForVendorWithoutThinkingBlocks() throws {
+        let projector = TranscriptProjector()
+        let fingerprint = ConversationFingerprint()
+        let target = RoutingSnapshot.RouteTarget(
+            baseURL: "https://api.example.com/anthropic",
+            apiKey: "key",
+            vendorName: "StrictVendor",
+            vendorID: UUID(uuidString: "00000000-0000-0000-0000-0000000000D2"),
+            targetModel: "strict-model",
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            supportsThinkingBlocks: false
+        )
+
+        let fullMessages: [[String: Any]] = [
+            ["role": "user", "content": "Run tool"],
+            ["role": "assistant", "content": [
+                ["type": "thinking", "thinking": "internal", "signature": "vendor_sig"],
+                ["type": "tool_use", "id": "toolu_1", "name": "Read", "input": ["path": "/tmp/file"]]
+            ]]
+        ]
+        let portableMessages = TranscriptProjector.makePortableMessages(from: fullMessages)
+        let portableHashes = try portableMessages.map { message in
+            fingerprint.sha256Hex(try TranscriptProjector.encodeJSONObject(message))
+        }
+        let branch = BranchTranscript(
+            lineageKey: "lineage-1",
+            branchKey: "branch-1",
+            clientName: "Claude Code",
+            vendorKey: TranscriptProjector.vendorKey(for: target),
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            fullMessagesData: try TranscriptProjector.encodeMessages(fullMessages),
+            portableMessagesData: try TranscriptProjector.encodeMessages(portableMessages),
+            portableMessageHashes: portableHashes,
+            lastUpdatedAt: .now
+        )
+
+        let nextRequest = try makeAnthropicRequestJSON(messages: portableMessages + [
+            ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_1", "content": "file contents"]
+            ]]
+        ])
+
+        let prepared = try projector.prepareRequest(
+            bodyData: nextRequest,
+            clientName: "Claude Code",
+            target: target,
+            existingBranches: [branch],
+            fingerprint: fingerprint
+        )
+
+        let json = try jsonObject(prepared.bodyData)
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let restoredAssistantBlocks = try #require(messages[1]["content"] as? [[String: Any]])
+        #expect(restoredAssistantBlocks.count == 1)
+        #expect(restoredAssistantBlocks.first?["type"] as? String == "tool_use")
+        #expect(!restoredAssistantBlocks.contains { $0["type"] as? String == "thinking" })
+        #expect(prepared.context?.reusedBranchHistory == true)
     }
 
     @Test func transparentRequestIsLeftUntouched() throws {

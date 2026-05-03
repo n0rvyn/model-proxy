@@ -98,15 +98,13 @@ private struct ClientRowSection: View {
                     }
                 }
 
-                TextField("Fallback model", text: Binding(
-                    get: { configStore.config.clients[index].fallbackTargetModel ?? "" },
-                    set: { newValue in
-                        configStore.config.clients[index].fallbackTargetModel = newValue.isEmpty ? nil : newValue
-                        configStore.saveAndReload(proxyServer: proxyServer)
-                    }
-                ), prompt: Text("e.g. qwen-plus (empty = keep original)"))
-                .autocorrectionDisabled()
-                .textContentType(nil)
+                VendorModelField(
+                    placeholder: "Fallback model (empty = keep original)",
+                    text: fallbackModelBinding,
+                    vendorSelection: fallbackVendorBinding,
+                    vendors: configStore.config.vendors,
+                    emptySelectionTitle: "Keep original model"
+                )
             }
 
             LabeledContent("Quick start") {
@@ -131,5 +129,25 @@ private struct ClientRowSection: View {
                 }
             }
         }
+    }
+
+    private var fallbackVendorBinding: Binding<UUID?> {
+        Binding(
+            get: { configStore.config.clients[index].fallbackVendorID },
+            set: { newValue in
+                configStore.config.clients[index].fallbackVendorID = newValue
+                configStore.saveAndReload(proxyServer: proxyServer)
+            }
+        )
+    }
+
+    private var fallbackModelBinding: Binding<String> {
+        Binding(
+            get: { configStore.config.clients[index].fallbackTargetModel ?? "" },
+            set: { newValue in
+                configStore.config.clients[index].fallbackTargetModel = newValue.isEmpty ? nil : newValue
+                configStore.saveAndReload(proxyServer: proxyServer)
+            }
+        )
     }
 }

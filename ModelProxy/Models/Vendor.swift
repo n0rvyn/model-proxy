@@ -1,5 +1,26 @@
 import Foundation
 
+enum VendorDefaults {
+    static let supportsThinkingBlocks = false
+    static let supportsAnthropicCountTokens = true
+    static let repairsAnthropicToolCalls = false
+
+    static func isDeepSeekBaseURL(_ baseURL: String) -> Bool {
+        if let host = URL(string: baseURL)?.host?.lowercased() {
+            return host == "api.deepseek.com"
+        }
+        return baseURL.lowercased().contains("api.deepseek.com")
+    }
+
+    static func supportsAnthropicCountTokens(forBaseURL baseURL: String) -> Bool {
+        isDeepSeekBaseURL(baseURL) ? false : supportsAnthropicCountTokens
+    }
+
+    static func repairsAnthropicToolCalls(forBaseURL baseURL: String) -> Bool {
+        isDeepSeekBaseURL(baseURL) ? true : repairsAnthropicToolCalls
+    }
+}
+
 /// A single upstream API provider.
 struct Vendor: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
@@ -19,6 +40,12 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
     var compatibleClientID: UUID?
     /// Vendor model IDs available for quick selection in routing forms.
     var supportedModels: [String]
+    /// Whether this vendor accepts Anthropic `thinking` content blocks in request history.
+    var supportsThinkingBlocks: Bool
+    /// Whether this vendor supports Anthropic `/v1/messages/count_tokens`.
+    var supportsAnthropicCountTokens: Bool
+    /// Whether ModelProxy should repair returned Anthropic `tool_use.input` blocks for this vendor.
+    var repairsAnthropicToolCalls: Bool
     /// Which signing domain this vendor belongs to for transcript replay compatibility.
     var signingDomain: SigningDomain
     /// Whether requests to this vendor should preserve raw replay-sensitive transcript blocks.
@@ -33,6 +60,9 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         readTimeoutSeconds: Int = 120,
         compatibleClientID: UUID? = nil,
         supportedModels: [String] = [],
+        supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks,
+        supportsAnthropicCountTokens: Bool? = nil,
+        repairsAnthropicToolCalls: Bool? = nil,
         signingDomain: SigningDomain? = nil,
         replayPolicy: TranscriptReplayPolicy? = nil
     ) {
@@ -45,6 +75,11 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         self.readTimeoutSeconds = readTimeoutSeconds
         self.compatibleClientID = compatibleClientID
         self.supportedModels = supportedModels
+        self.supportsThinkingBlocks = supportsThinkingBlocks
+        self.supportsAnthropicCountTokens = supportsAnthropicCountTokens
+            ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+        self.repairsAnthropicToolCalls = repairsAnthropicToolCalls
+            ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
         self.signingDomain = resolvedSigningDomain
         self.replayPolicy = replayPolicy ?? TranscriptReplayPolicy.defaultPolicy(for: resolvedSigningDomain)
     }
@@ -56,6 +91,9 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         case connectTimeoutSeconds, readTimeoutSeconds
         case compatibleClientID
         case supportedModels
+        case supportsThinkingBlocks
+        case supportsAnthropicCountTokens
+        case repairsAnthropicToolCalls
         case signingDomain
         case replayPolicy
     }
@@ -70,6 +108,12 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         readTimeoutSeconds = (try? c.decode(Int.self, forKey: .readTimeoutSeconds)) ?? 120
         compatibleClientID = try? c.decode(UUID.self, forKey: .compatibleClientID)
         supportedModels = (try? c.decode([String].self, forKey: .supportedModels)) ?? []
+        supportsThinkingBlocks = (try? c.decode(Bool.self, forKey: .supportsThinkingBlocks))
+            ?? VendorDefaults.supportsThinkingBlocks
+        supportsAnthropicCountTokens = (try? c.decodeIfPresent(Bool.self, forKey: .supportsAnthropicCountTokens))
+            ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+        repairsAnthropicToolCalls = (try? c.decodeIfPresent(Bool.self, forKey: .repairsAnthropicToolCalls))
+            ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
         let resolvedSigningDomain = (try? c.decode(SigningDomain.self, forKey: .signingDomain))
             ?? SigningDomain.infer(fromBaseURL: baseURL)
         signingDomain = resolvedSigningDomain

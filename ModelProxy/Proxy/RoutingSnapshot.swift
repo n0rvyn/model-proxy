@@ -26,6 +26,42 @@ struct RoutingSnapshot: Sendable {
         let signingDomain: SigningDomain
         /// Replay policy for this target.
         let replayPolicy: TranscriptReplayPolicy
+        /// Whether this target accepts Anthropic `thinking` content blocks.
+        let supportsThinkingBlocks: Bool
+        /// Whether this target accepts Anthropic `/v1/messages/count_tokens`.
+        let supportsAnthropicCountTokens: Bool
+        /// Whether ModelProxy should repair returned Anthropic `tool_use.input` blocks.
+        let repairsAnthropicToolCalls: Bool
+
+        init(
+            baseURL: String,
+            apiKey: String,
+            vendorName: String,
+            vendorID: UUID?,
+            targetModel: String?,
+            isPassthrough: Bool,
+            connectTimeoutSeconds: Int,
+            readTimeoutSeconds: Int,
+            signingDomain: SigningDomain,
+            replayPolicy: TranscriptReplayPolicy,
+            supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks,
+            supportsAnthropicCountTokens: Bool = VendorDefaults.supportsAnthropicCountTokens,
+            repairsAnthropicToolCalls: Bool = VendorDefaults.repairsAnthropicToolCalls
+        ) {
+            self.baseURL = baseURL
+            self.apiKey = apiKey
+            self.vendorName = vendorName
+            self.vendorID = vendorID
+            self.targetModel = targetModel
+            self.isPassthrough = isPassthrough
+            self.connectTimeoutSeconds = connectTimeoutSeconds
+            self.readTimeoutSeconds = readTimeoutSeconds
+            self.signingDomain = signingDomain
+            self.replayPolicy = replayPolicy
+            self.supportsThinkingBlocks = supportsThinkingBlocks
+            self.supportsAnthropicCountTokens = supportsAnthropicCountTokens
+            self.repairsAnthropicToolCalls = repairsAnthropicToolCalls
+        }
     }
 
     // MARK: - Failover state
@@ -77,7 +113,10 @@ struct RoutingSnapshot: Sendable {
                 connectTimeoutSeconds: vendor.connectTimeoutSeconds,
                 readTimeoutSeconds: vendor.readTimeoutSeconds,
                 signingDomain: vendor.signingDomain,
-                replayPolicy: vendor.replayPolicy
+                replayPolicy: vendor.replayPolicy,
+                supportsThinkingBlocks: vendor.supportsThinkingBlocks,
+                supportsAnthropicCountTokens: vendor.supportsAnthropicCountTokens,
+                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls
             )
             var targets = [primary]
 
@@ -95,7 +134,10 @@ struct RoutingSnapshot: Sendable {
                     connectTimeoutSeconds: backupVendor.connectTimeoutSeconds,
                     readTimeoutSeconds: backupVendor.readTimeoutSeconds,
                     signingDomain: backupVendor.signingDomain,
-                    replayPolicy: backupVendor.replayPolicy
+                    replayPolicy: backupVendor.replayPolicy,
+                    supportsThinkingBlocks: backupVendor.supportsThinkingBlocks,
+                    supportsAnthropicCountTokens: backupVendor.supportsAnthropicCountTokens,
+                    repairsAnthropicToolCalls: backupVendor.repairsAnthropicToolCalls
                 )
                 targets.append(backup)
             }
@@ -125,7 +167,10 @@ struct RoutingSnapshot: Sendable {
                 connectTimeoutSeconds: vendor.connectTimeoutSeconds,
                 readTimeoutSeconds: vendor.readTimeoutSeconds,
                 signingDomain: vendor.signingDomain,
-                replayPolicy: vendor.replayPolicy
+                replayPolicy: vendor.replayPolicy,
+                supportsThinkingBlocks: vendor.supportsThinkingBlocks,
+                supportsAnthropicCountTokens: vendor.supportsAnthropicCountTokens,
+                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls
             )
         } else {
             self.fallbackTarget = nil
@@ -145,38 +190,34 @@ struct RoutingSnapshot: Sendable {
         let defaultState = RouteState()
         switch unmappedPolicy {
         case .passthrough:
-            return (.routed(RouteTarget(
-                baseURL: passthroughBaseURL,
-                apiKey: originalAPIKey,
-                vendorName: "passthrough",
-                vendorID: nil,
-                targetModel: nil,
-                isPassthrough: true,
-                connectTimeoutSeconds: 10,
-                readTimeoutSeconds: 120,
-                signingDomain: SigningDomain.infer(fromBaseURL: passthroughBaseURL),
-                replayPolicy: .transparent
-            )), defaultState)
+            return (.routed(passthroughTarget(originalAPIKey: originalAPIKey)), defaultState)
         case .routeAll:
             if let fallback = fallbackTarget {
                 return (.routed(fallback), defaultState)
             }
             AppLog.proxy.warning("[RoutingSnapshot] routeAll fallback vendor missing or deleted for model '\(model)'; falling back to passthrough")
-            return (.routed(RouteTarget(
-                baseURL: passthroughBaseURL,
-                apiKey: originalAPIKey,
-                vendorName: "passthrough",
-                vendorID: nil,
-                targetModel: nil,
-                isPassthrough: true,
-                connectTimeoutSeconds: 10,
-                readTimeoutSeconds: 120,
-                signingDomain: SigningDomain.infer(fromBaseURL: passthroughBaseURL),
-                replayPolicy: .transparent
-            )), defaultState)
+            return (.routed(passthroughTarget(originalAPIKey: originalAPIKey)), defaultState)
         case .block:
             return (.blocked(reason: "Model '\(model)' is not mapped and this client is set to block unmapped models."), defaultState)
         }
+    }
+
+    func passthroughTarget(originalAPIKey: String) -> RouteTarget {
+        RouteTarget(
+            baseURL: passthroughBaseURL,
+            apiKey: originalAPIKey,
+            vendorName: "passthrough",
+            vendorID: nil,
+            targetModel: nil,
+            isPassthrough: true,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: SigningDomain.infer(fromBaseURL: passthroughBaseURL),
+            replayPolicy: .transparent,
+            supportsThinkingBlocks: true,
+            supportsAnthropicCountTokens: true,
+            repairsAnthropicToolCalls: false
+        )
     }
 
     /// Returns all targets for a mapped model (for failover use by ProxyForwarder).
