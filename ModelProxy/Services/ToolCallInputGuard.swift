@@ -152,8 +152,25 @@ struct ToolCallInputGuard {
         guard let name = block["name"] as? String, !name.isEmpty else {
             return BlockResult(block: nil, action: .dropped("missing_tool_name"))
         }
-        guard let schema = catalog.schemasByName[name] else {
-            return BlockResult(block: nil, action: .dropped("unknown_tool"))
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var resolvedName = trimmedName
+        var repairReasons: [String] = []
+
+        let schema: [String: Any]
+        if let exact = catalog.schemasByName[trimmedName] {
+            schema = exact
+        } else {
+            let lower = trimmedName.lowercased()
+            let matches = catalog.schemasByName.keys.filter { $0.lowercased() == lower }
+            if matches.count == 1, let matchName = matches.first, let matchSchema = catalog.schemasByName[matchName] {
+                schema = matchSchema
+                resolvedName = matchName
+                repairReasons.append("name_case_normalized")
+            } else if matches.count > 1 {
+                return BlockResult(block: nil, action: .dropped("ambiguous_tool_name"))
+            } else {
+                return BlockResult(block: nil, action: .dropped("unknown_tool"))
+            }
         }
 
         let required = Set((schema["required"] as? [String]) ?? [])
@@ -165,8 +182,8 @@ struct ToolCallInputGuard {
         }
 
         var repairedBlock = block
+        repairedBlock["name"] = resolvedName
         var inputObject: [String: Any]
-        var repairReasons: [String] = []
 
         if let input = block["input"] {
             if let dictionary = input as? [String: Any] {

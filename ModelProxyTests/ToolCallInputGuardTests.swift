@@ -378,6 +378,63 @@ struct ToolCallInputGuardTests {
         }
         return schema
     }
+    @Test func trimsWhitespaceFromToolNameBeforeCatalogLookup() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": " Bash ",
+            "input": [:]
+        ])
+
+        switch result.action {
+        case .unchanged:
+            break
+        case .repaired:
+            Issue.record("Expected unchanged after trim, got repaired")
+        case .dropped(let reason):
+            Issue.record("Expected match after trim, got dropped: \(reason)")
+        }
+        let block = try #require(result.block)
+        #expect(block["name"] as? String == "Bash")
+    }
+
+    @Test func caseInsensitiveToolNameMatch() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "bash",
+            "input": [:]
+        ])
+
+        guard case .repaired(let reason) = result.action else {
+            Issue.record("Expected repaired action"); return
+        }
+        #expect(reason.contains("name_case_normalized"))
+        let block = try #require(result.block)
+        #expect(block["name"] as? String == "Bash")
+    }
+
+    @Test func ambiguousToolNameDropped() throws {
+        // Catalog with two tools that differ only by case
+        let catalog = ToolCallInputGuard.ToolCatalog(schemasByName: [
+            "grep": objectSchema(),
+            "Grep": objectSchema()
+        ])
+        let guarder = ToolCallInputGuard(catalog: catalog)
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "greP",
+            "input": [:]
+        ])
+
+        guard case .dropped(let reason) = result.action else {
+            Issue.record("Expected dropped action"); return
+        }
+        #expect(reason.contains("ambiguous_tool_name"))
+    }
 }
 
 private extension Array {
