@@ -197,25 +197,22 @@ final class PortableSSEStreamNormalizer {
         let isToolUse = (visibleBlock["type"] as? String)?.lowercased() == "tool_use"
 
         activeBlocks[originalIndex] = SSEContentBlockBuilder(block: visibleBlock)
-        if portableMode, TranscriptProjector.isNonPortableBlock(visibleBlock) {
-            return nil
-        }
 
-        let visibleIndex: Int
+        // In portable mode, remap all blocks into a contiguous visible index space.
+        // Non-portable blocks still need unique visible indices since they're relayed.
         if portableMode {
-            visibleIndex = nextVisibleIndex
+            visibleIndexMap[originalIndex] = nextVisibleIndex
             nextVisibleIndex += 1
-        } else {
-            visibleIndex = originalIndex
         }
-        visibleIndexMap[originalIndex] = visibleIndex
 
         if toolCallGuard != nil, isToolUse {
             delayedToolUseIndexes.insert(originalIndex)
             return nil
         }
 
-        json["index"] = visibleIndex
+        if let visibleIndex = visibleIndexMap[originalIndex] {
+            json["index"] = visibleIndex
+        }
         json["content_block"] = visibleBlock
         return try encodeEvent(name: eventName, json: json)
     }
@@ -232,17 +229,11 @@ final class PortableSSEStreamNormalizer {
             return nil
         }
 
-        guard let visibleIndex = visibleIndexMap[originalIndex] else {
-            return nil
+        if let visibleIndex = visibleIndexMap[originalIndex] {
+            json["index"] = visibleIndex
+            return try encodeEvent(name: eventName, json: json)
         }
 
-        if let deltaType = (delta["type"] as? String)?.lowercased(),
-           portableMode,
-           deltaType == "signature_delta" || deltaType.contains("thinking") || deltaType.contains("reasoning") {
-            return nil
-        }
-
-        json["index"] = visibleIndex
         return try encodeEvent(name: eventName, json: json)
     }
 
@@ -272,6 +263,7 @@ final class PortableSSEStreamNormalizer {
                 visibleIndexMap.removeValue(forKey: originalIndex)
                 return try encodeEvent(name: eventName, json: json)
             }
+            return try encodeEvent(name: eventName, json: json)
         }
         return nil
     }

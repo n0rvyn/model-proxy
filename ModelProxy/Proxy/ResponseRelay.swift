@@ -203,15 +203,15 @@ enum ResponseRelay {
                    let lineageBroker {
                     let normalized = try portableNormalizer.normalizeJSONBody(transformedBody)
                     Self.replaceReplayBody(
-                        normalized.bodyData,
+                        transformedBody,
                         shouldCaptureReplay: shouldCaptureReplay,
                         requestID: requestID,
                         statusCode: statusCode,
                         replayRecorder: &replayRecorder,
                         replayOverflowLogged: &replayOverflowLogged
                     )
-                    var out = channel.allocator.buffer(capacity: normalized.bodyData.count)
-                    out.writeBytes(normalized.bodyData)
+                    var out = channel.allocator.buffer(capacity: transformedBody.count)
+                    out.writeBytes(transformedBody)
                     try await channel.writeAndFlush(
                         NIOAny(HTTPServerResponsePart.body(.byteBuffer(out)))
                     ).get()

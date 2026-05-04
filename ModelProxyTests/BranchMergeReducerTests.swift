@@ -94,7 +94,7 @@ struct BranchMergeReducerTests {
         #expect(normalized.assistantTurn != nil)
     }
 
-    @Test func sseNormalizerSuppressesThinkingEventsButKeepsFullTurnInternally() throws {
+    @Test func sseNormalizerRelaysThinkingEventsAndKeepsFullTurnInternally() throws {
         let normalizer = PortableContentNormalizer().makeSSEStreamNormalizer()
         let allocator = ByteBufferAllocator()
 
@@ -116,7 +116,7 @@ struct BranchMergeReducerTests {
         }
 
         let text = String(data: output, encoding: .utf8) ?? ""
-        #expect(!text.contains("\"thinking\""))
+        #expect(text.contains("\"thinking\""))
         #expect(text.contains("Visible output"))
 
         let finishedTurn = try normalizer.finish()
