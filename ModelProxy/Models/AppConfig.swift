@@ -79,7 +79,11 @@ final class AppConfig: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         vendors = try container.decode([Vendor].self, forKey: .vendors)
         clients = try container.decode([ClientConfig].self, forKey: .clients)
-        modelMappings = (try? container.decode([ModelMapping].self, forKey: .modelMappings)) ?? []
+        if container.contains(.modelMappings) {
+            modelMappings = try container.decode([ModelMapping].self, forKey: .modelMappings)
+        } else {
+            modelMappings = []
+        }
         debug = (try? container.decode(DebugConfig.self, forKey: .debug)) ?? DebugConfig()
         modelPricingOverrides = (try? container.decode([String: ModelPrice].self, forKey: .modelPricingOverrides)) ?? [:]
         webSearch = (try? container.decode(WebSearchConfig.self, forKey: .webSearch)) ?? WebSearchConfig()

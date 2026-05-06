@@ -15,6 +15,8 @@ struct ModelMapping: Identifiable, Codable, Equatable, Sendable {
     var backupTargetModel: String?
     /// UUID of the backup Vendor for failover.
     var backupTargetVendorID: UUID?
+    /// Whether this routing rule participates in runtime routing.
+    var isEnabled: Bool
 
     init(
         id: UUID = UUID(),
@@ -22,7 +24,8 @@ struct ModelMapping: Identifiable, Codable, Equatable, Sendable {
         targetModel: String,
         targetVendorID: UUID,
         backupTargetModel: String? = nil,
-        backupTargetVendorID: UUID? = nil
+        backupTargetVendorID: UUID? = nil,
+        isEnabled: Bool = true
     ) {
         self.id = id
         self.sourceModel = sourceModel
@@ -30,13 +33,14 @@ struct ModelMapping: Identifiable, Codable, Equatable, Sendable {
         self.targetVendorID = targetVendorID
         self.backupTargetModel = backupTargetModel
         self.backupTargetVendorID = backupTargetVendorID
+        self.isEnabled = isEnabled
     }
 
     // MARK: - Codable (legacy-tolerant)
 
     enum CodingKeys: String, CodingKey {
         case id, sourceModel, targetModel, targetVendorID
-        case backupTargetModel, backupTargetVendorID
+        case backupTargetModel, backupTargetVendorID, isEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -47,5 +51,30 @@ struct ModelMapping: Identifiable, Codable, Equatable, Sendable {
         targetVendorID = try c.decode(UUID.self, forKey: .targetVendorID)
         backupTargetModel = try? c.decode(String.self, forKey: .backupTargetModel)
         backupTargetVendorID = try? c.decode(UUID.self, forKey: .backupTargetVendorID)
+        if c.contains(.isEnabled) {
+            isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
+        } else {
+            isEnabled = true
+        }
+    }
+}
+
+enum ModelMappingActivation {
+    static func setEnabled(_ isEnabled: Bool, for id: UUID, in mappings: inout [ModelMapping]) {
+        guard let index = mappings.firstIndex(where: { $0.id == id }) else { return }
+        mappings[index].isEnabled = isEnabled
+        guard isEnabled else { return }
+        enforceSingleEnabledSource(for: id, in: &mappings)
+    }
+
+    static func enforceSingleEnabledSource(for id: UUID, in mappings: inout [ModelMapping]) {
+        guard let index = mappings.firstIndex(where: { $0.id == id }),
+              mappings[index].isEnabled else { return }
+        let sourceModel = mappings[index].sourceModel.trimmingCharacters(in: .whitespaces)
+        for mappingIndex in mappings.indices where mappings[mappingIndex].id != id {
+            if mappings[mappingIndex].sourceModel.trimmingCharacters(in: .whitespaces) == sourceModel {
+                mappings[mappingIndex].isEnabled = false
+            }
+        }
     }
 }
