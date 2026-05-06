@@ -62,7 +62,7 @@ struct StatisticsTabView: View {
     private func statsTable(
         rows: [(vendorID: UUID, model: String, record: ModelTokenRecord)]
     ) -> some View {
-        let mappings = configStore.config.modelMappings
+        let activeMappingRows = self.activeMappings
         let overrides = configStore.config.modelPricingOverrides
 
         ScrollView {
@@ -88,7 +88,10 @@ struct StatisticsTabView: View {
                 Divider()
 
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    let sourceModel = mappings.first(where: { $0.targetModel == row.model })?.sourceModel
+                    let candidateMappings = activeMappingRows.filter {
+                        $0.targetVendorID == row.vendorID && $0.targetModel == row.model
+                    }
+                    let sourceModel = candidateMappings.count == 1 ? candidateMappings[0].sourceModel : nil
                     let price = ModelPrice.lookup(row.model, overrides: overrides)
                     let cost = price?.cost(input: row.record.inputTokens, output: row.record.outputTokens)
 
@@ -167,13 +170,13 @@ struct StatisticsTabView: View {
 
     private func computeSavings() -> Double {
         let overrides = configStore.config.modelPricingOverrides
-        let mappings = configStore.config.modelMappings
+        let mappingsBySourceModel = self.activeMappingBySourceModel
         let sourceRecords = tokenStatsStore.stats.sourceModelRecords
 
         var totalSavings = 0.0
         for (sourceModel, record) in sourceRecords {
             guard let sourcePrice = ModelPrice.lookup(sourceModel, overrides: overrides) else { continue }
-            guard let mapping = mappings.first(where: { $0.sourceModel == sourceModel }) else { continue }
+            guard let mapping = mappingsBySourceModel[sourceModel] else { continue }
             guard let targetPrice = ModelPrice.lookup(mapping.targetModel, overrides: overrides) else { continue }
 
             let sourceCost = sourcePrice.cost(input: record.inputTokens, output: record.outputTokens)
@@ -181,6 +184,24 @@ struct StatisticsTabView: View {
             totalSavings += max(0, sourceCost - targetCost)
         }
         return totalSavings
+    }
+
+    private var activeMappings: [ModelMapping] {
+        var result: [ModelMapping] = []
+        var seenSources: Set<String> = []
+
+        for mapping in configStore.config.modelMappings {
+            guard mapping.isEnabled,
+                  !seenSources.contains(mapping.sourceModel) else { continue }
+            seenSources.insert(mapping.sourceModel)
+            result.append(mapping)
+        }
+
+        return result
+    }
+
+    private var activeMappingBySourceModel: [String: ModelMapping] {
+        Dictionary(uniqueKeysWithValues: activeMappings.map { ($0.sourceModel, $0) })
     }
 }
 

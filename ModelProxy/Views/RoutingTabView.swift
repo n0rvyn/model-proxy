@@ -6,6 +6,10 @@ struct RoutingTabView: View {
 
     @State private var showAddRow: Bool = false
 
+    private var observedModels: [String] {
+        KnownAnthropicModels.observedSuggestions(from: proxyServer.trafficLog.entries.map(\.model))
+    }
+
     var body: some View {
         Form {
             Section {
@@ -17,15 +21,17 @@ struct RoutingTabView: View {
                 }
 
                 ForEach(configStore.config.modelMappings) { mapping in
-                    MappingRow(mapping: mapping)
+                    MappingRow(mapping: mapping, observedModels: observedModels)
                         .environment(configStore)
                         .environment(proxyServer)
                 }
 
                 if showAddRow {
                     AddMappingRow(
+                        observedModels: observedModels,
                         onAdd: { newMapping in
                             configStore.config.modelMappings.append(newMapping)
+                            ModelMappingActivation.enforceSingleEnabledSource(for: newMapping.id, in: &configStore.config.modelMappings)
                             configStore.saveAndReload(proxyServer: proxyServer)
                             showAddRow = false
                         },
@@ -59,6 +65,7 @@ private struct MappingRow: View {
     @Environment(ConfigStore.self) private var configStore
     @Environment(ProxyServer.self) private var proxyServer
     let mapping: ModelMapping
+    let observedModels: [String]
 
     @State private var isEditing = false
     @State private var showDeleteConfirmation = false
@@ -71,6 +78,10 @@ private struct MappingRow: View {
 
     private var vendorName: String {
         configStore.config.vendors.first(where: { $0.id == mapping.targetVendorID })?.name ?? "Unknown vendor"
+    }
+
+    private var currentIsEnabled: Bool {
+        configStore.config.modelMappings.first(where: { $0.id == mapping.id })?.isEnabled ?? mapping.isEnabled
     }
 
     private func roleBadge(_ title: String, icon: String, color: Color) -> some View {
@@ -87,18 +98,18 @@ private struct MappingRow: View {
     var body: some View {
         if isEditing {
             VStack(alignment: .leading, spacing: 8) {
-                SourceModelField(text: $editSourceModel)
-                VendorModelField(
-                    placeholder: "Target model (vendor model name)",
-                    text: $editTargetModel,
-                    vendorSelection: $editVendorID,
-                    vendors: configStore.config.vendors
-                )
+                SourceModelField(text: $editSourceModel, observedModels: observedModels)
                 VendorMenuField(
                     placeholder: "Target vendor",
                     selection: $editVendorID,
                     vendors: configStore.config.vendors,
                     clients: configStore.config.clients
+                )
+                VendorModelField(
+                    placeholder: "Target model (vendor model name)",
+                    text: $editTargetModel,
+                    vendorSelection: $editVendorID,
+                    vendors: configStore.config.vendors
                 )
 
                 if showBackupFields {
@@ -106,17 +117,17 @@ private struct MappingRow: View {
                     Text("Backup Target")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    VendorModelField(
-                        placeholder: "Backup model (vendor model name)",
-                        text: $editBackupTargetModel,
-                        vendorSelection: $editBackupVendorID,
-                        vendors: configStore.config.vendors
-                    )
                     VendorMenuField(
                         placeholder: "Backup vendor",
                         selection: $editBackupVendorID,
                         vendors: configStore.config.vendors,
                         clients: configStore.config.clients
+                    )
+                    VendorModelField(
+                        placeholder: "Backup model (vendor model name)",
+                        text: $editBackupTargetModel,
+                        vendorSelection: $editBackupVendorID,
+                        vendors: configStore.config.vendors
                     )
                 }
 
@@ -155,6 +166,9 @@ private struct MappingRow: View {
                             configStore.config.modelMappings[index].backupTargetModel = nil
                             configStore.config.modelMappings[index].backupTargetVendorID = nil
                         }
+                        if configStore.config.modelMappings[index].isEnabled {
+                            ModelMappingActivation.enforceSingleEnabledSource(for: mapping.id, in: &configStore.config.modelMappings)
+                        }
                         configStore.saveAndReload(proxyServer: proxyServer)
                         isEditing = false
                     }
@@ -182,40 +196,58 @@ private struct MappingRow: View {
             }
         } else {
             HStack {
-                Text(mapping.sourceModel)
-                    .font(.system(.body, design: .monospaced))
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    if mapping.backupTargetVendorID == nil {
-                        Text(mapping.targetModel)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    HStack(spacing: 4) {
-                        if mapping.backupTargetVendorID != nil {
+                Toggle(
+                    "Enabled",
+                    isOn: Binding(
+                        get: { currentIsEnabled },
+                        set: { isEnabled in
+                            ModelMappingActivation.setEnabled(isEnabled, for: mapping.id, in: &configStore.config.modelMappings)
+                            configStore.saveAndReload(proxyServer: proxyServer)
+                        }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .help("Enable routing rule")
+                .accessibilityLabel("Enable rule for \(mapping.sourceModel)")
+
+                HStack {
+                    Text(mapping.sourceModel)
+                        .font(.system(.body, design: .monospaced))
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        if mapping.backupTargetVendorID == nil {
                             Text(mapping.targetModel)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                                .font(.system(.body, design: .monospaced))
                         }
-                        Text(vendorName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if mapping.backupTargetVendorID != nil {
-                            roleBadge("Primary", icon: "checkmark.circle.fill", color: .blue)
-                        }
-                    }
-                    if let backupVendorID = mapping.backupTargetVendorID {
                         HStack(spacing: 4) {
-                            Text(mapping.backupTargetModel ?? mapping.targetModel)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Text(configStore.config.vendors.first(where: { $0.id == backupVendorID })?.name ?? "Unknown")
+                            if mapping.backupTargetVendorID != nil {
+                                Text(mapping.targetModel)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(vendorName)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            roleBadge("Backup", icon: "arrow.clockwise.circle.fill", color: .secondary)
+                            if mapping.backupTargetVendorID != nil {
+                                roleBadge("Primary", icon: "checkmark.circle.fill", color: .blue)
+                            }
+                        }
+                        if let backupVendorID = mapping.backupTargetVendorID {
+                            HStack(spacing: 4) {
+                                Text(mapping.backupTargetModel ?? mapping.targetModel)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(configStore.config.vendors.first(where: { $0.id == backupVendorID })?.name ?? "Unknown")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                roleBadge("Backup", icon: "arrow.clockwise.circle.fill", color: .secondary)
+                            }
                         }
                     }
                 }
+                .opacity(currentIsEnabled ? 1 : 0.55)
                 Spacer()
                 Button("Edit") {
                     editSourceModel = mapping.sourceModel
@@ -253,6 +285,7 @@ private struct MappingRow: View {
 
 private struct AddMappingRow: View {
     @Environment(ConfigStore.self) private var configStore
+    let observedModels: [String]
     let onAdd: (ModelMapping) -> Void
     let onCancel: () -> Void
 
@@ -265,18 +298,18 @@ private struct AddMappingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SourceModelField(text: $selectedSourceModel)
-            VendorModelField(
-                placeholder: "Target model (vendor model name)",
-                text: $targetModel,
-                vendorSelection: $selectedVendorID,
-                vendors: configStore.config.vendors
-            )
+            SourceModelField(text: $selectedSourceModel, observedModels: observedModels)
             VendorMenuField(
                 placeholder: "Target vendor",
                 selection: $selectedVendorID,
                 vendors: configStore.config.vendors,
                 clients: configStore.config.clients
+            )
+            VendorModelField(
+                placeholder: "Target model (vendor model name)",
+                text: $targetModel,
+                vendorSelection: $selectedVendorID,
+                vendors: configStore.config.vendors
             )
 
             if showBackupFields {
@@ -284,17 +317,17 @@ private struct AddMappingRow: View {
                 Text("Backup Target")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                VendorModelField(
-                    placeholder: "Backup model (vendor model name)",
-                    text: $backupTargetModel,
-                    vendorSelection: $backupTargetVendorID,
-                    vendors: configStore.config.vendors
-                )
                 VendorMenuField(
                     placeholder: "Backup vendor",
                     selection: $backupTargetVendorID,
                     vendors: configStore.config.vendors,
                     clients: configStore.config.clients
+                )
+                VendorModelField(
+                    placeholder: "Backup model (vendor model name)",
+                    text: $backupTargetModel,
+                    vendorSelection: $backupTargetVendorID,
+                    vendors: configStore.config.vendors
                 )
             }
 
@@ -375,17 +408,32 @@ private struct AddMappingRow: View {
 /// TextField with a preset menu for quick selection of known Anthropic model IDs.
 private struct SourceModelField: View {
     @Binding var text: String
+    let observedModels: [String]
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        TextField("Source model (e.g. claude-haiku-4-5)", text: $text)
+        TextField("Source model (e.g. claude-sonnet-4-6)", text: $text)
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
             .focused($isFocused)
             .overlay(alignment: .trailing) {
                 Menu {
-                    ForEach(KnownAnthropicModels.all, id: \.self) { model in
-                        Button(model) { text = model }
+                    Section("Current") {
+                        ForEach(KnownAnthropicModels.current, id: \.self) { model in
+                            Button(model) { text = model }
+                        }
+                    }
+                    if !observedModels.isEmpty {
+                        Section("Observed") {
+                            ForEach(observedModels, id: \.self) { model in
+                                Button(model) { text = model }
+                            }
+                        }
+                    }
+                    Section("Legacy") {
+                        ForEach(KnownAnthropicModels.legacy, id: \.self) { model in
+                            Button(model) { text = model }
+                        }
                     }
                     Divider()
                     Button("Custom...") {
