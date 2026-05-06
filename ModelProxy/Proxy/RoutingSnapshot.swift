@@ -100,6 +100,9 @@ struct RoutingSnapshot: Sendable {
     init(from config: AppConfig, for clientConfig: ClientConfig) {
         var mappings: [String: [RouteTarget]] = [:]
         for mapping in config.modelMappings {
+            guard mapping.isEnabled else {
+                continue
+            }
             guard let vendor = config.vendors.first(where: { $0.id == mapping.targetVendorID }) else {
                 continue
             }
@@ -142,7 +145,10 @@ struct RoutingSnapshot: Sendable {
                 targets.append(backup)
             }
 
-            mappings[mapping.sourceModel] = targets
+            // Defensive fallback for hand-edited config: first enabled row wins.
+            if mappings[mapping.sourceModel] == nil {
+                mappings[mapping.sourceModel] = targets
+            }
         }
         self.modelMappings = mappings
         self.routeStates = [:]
