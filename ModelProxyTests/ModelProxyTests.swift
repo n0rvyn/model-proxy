@@ -188,6 +188,33 @@ struct ModelProxyTests {
         #expect(decoded == original)
     }
 
+    @Test func modelMappingInitializerDefaultsToEnabled() {
+        let vendorID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let mapping = ModelMapping(
+            sourceModel: "claude-haiku-4-5",
+            targetModel: "qwen-turbo",
+            targetVendorID: vendorID
+        )
+
+        #expect(mapping.isEnabled == true)
+    }
+
+    @Test func modelMappingCodableRoundTripPreservesDisabledState() throws {
+        let vendorID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let original = ModelMapping(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000010")!,
+            sourceModel: "claude-haiku-4-5",
+            targetModel: "qwen-turbo",
+            targetVendorID: vendorID,
+            isEnabled: false
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(ModelMapping.self, from: data)
+
+        #expect(decoded == original)
+        #expect(decoded.isEnabled == false)
+    }
+
     // MARK: - ModelMapping with backup target round-trip
 
     @Test func modelMappingWithBackupTargetRoundTrip() throws {
@@ -222,6 +249,108 @@ struct ModelProxyTests {
         let decoded = try JSONDecoder().decode(ModelMapping.self, from: legacyJSON)
         #expect(decoded.backupTargetModel == nil)
         #expect(decoded.backupTargetVendorID == nil)
+        #expect(decoded.isEnabled == true)
+    }
+
+    @Test func modelMappingMalformedIsEnabledFailsDecode() throws {
+        let json = """
+        {
+            "id": "00000000-0000-0000-0000-000000000010",
+            "sourceModel": "claude-haiku-4-5",
+            "targetModel": "qwen-turbo",
+            "targetVendorID": "00000000-0000-0000-0000-000000000002",
+            "isEnabled": "false"
+        }
+        """
+
+        expectDecodeFailure(ModelMapping.self, from: json)
+    }
+
+    @Test func modelMappingNullIsEnabledFailsDecode() throws {
+        let json = """
+        {
+            "id": "00000000-0000-0000-0000-000000000010",
+            "sourceModel": "claude-haiku-4-5",
+            "targetModel": "qwen-turbo",
+            "targetVendorID": "00000000-0000-0000-0000-000000000002",
+            "isEnabled": null
+        }
+        """
+
+        expectDecodeFailure(ModelMapping.self, from: json)
+    }
+
+    @Test func appConfigMalformedModelMappingIsEnabledFailsDecode() throws {
+        let json = """
+        {
+            "vendors": [],
+            "clients": [],
+            "modelMappings": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000010",
+                    "sourceModel": "claude-haiku-4-5",
+                    "targetModel": "qwen-turbo",
+                    "targetVendorID": "00000000-0000-0000-0000-000000000002",
+                    "isEnabled": "false"
+                }
+            ]
+        }
+        """
+
+        expectDecodeFailure(AppConfig.self, from: json)
+    }
+
+    @Test func appConfigNullModelMappingsFailsDecode() throws {
+        let json = """
+        {
+            "vendors": [],
+            "clients": [],
+            "modelMappings": null
+        }
+        """
+
+        expectDecodeFailure(AppConfig.self, from: json)
+    }
+
+    @Test func modelMappingActivationDisablesSameSourceSiblings() {
+        let vendorID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+        let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+        var mappings = [
+            ModelMapping(id: firstID, sourceModel: " claude-haiku-4-5 ", targetModel: "qwen-turbo", targetVendorID: vendorID),
+            ModelMapping(id: secondID, sourceModel: "claude-haiku-4-5", targetModel: "qwen-plus", targetVendorID: vendorID, isEnabled: false),
+        ]
+
+        ModelMappingActivation.setEnabled(true, for: secondID, in: &mappings)
+
+        #expect(mappings[0].isEnabled == false)
+        #expect(mappings[1].isEnabled == true)
+    }
+
+    @Test func modelMappingActivationLeavesOtherSourcesUnchanged() {
+        let vendorID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+        let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+        var mappings = [
+            ModelMapping(id: firstID, sourceModel: "claude-haiku-4-5", targetModel: "qwen-turbo", targetVendorID: vendorID, isEnabled: false),
+            ModelMapping(id: secondID, sourceModel: "claude-sonnet-4-6", targetModel: "qwen-plus", targetVendorID: vendorID),
+        ]
+
+        ModelMappingActivation.setEnabled(true, for: firstID, in: &mappings)
+
+        #expect(mappings[0].isEnabled == true)
+        #expect(mappings[1].isEnabled == true)
+    }
+
+    @Test func knownAnthropicModelsObservedSuggestionsAreNewestFirstDedupedAndExcludeStaticPresets() {
+        let suggestions = KnownAnthropicModels.observedSuggestions(from: [
+            "claude-custom-a",
+            "claude-sonnet-4-6",
+            "claude-custom-b",
+            "claude-custom-a",
+        ])
+
+        #expect(suggestions == ["claude-custom-a", "claude-custom-b"])
     }
 
     // MARK: - AppConfig round-trip
@@ -297,6 +426,65 @@ struct ModelProxyTests {
         #expect(target.supportsThinkingBlocks == true)
         #expect(target.supportsAnthropicCountTokens == true)
         #expect(target.repairsAnthropicToolCalls == false)
+    }
+
+    @Test func routingSnapshotIgnoresDisabledMapping_disabledMapping() {
+        let vendor = Vendor(name: "DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode", apiKey: "dash-test-key")
+        let mapping = ModelMapping(
+            sourceModel: "claude-haiku-4-5",
+            targetModel: "qwen-turbo",
+            targetVendorID: vendor.id,
+            isEnabled: false
+        )
+        let client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
+        let config = AppConfig(vendors: [vendor], clients: [client], modelMappings: [mapping])
+        let snapshot = RoutingSnapshot(from: config, for: client)
+
+        let (result, _) = snapshot.resolve(model: "claude-haiku-4-5", originalAPIKey: "original-key")
+        guard case .routed(let target) = result else {
+            Issue.record("Expected .routed, got \(result)")
+            return
+        }
+        #expect(target.isPassthrough)
+        #expect(target.baseURL == "https://api.anthropic.com")
+        #expect(target.targetModel == nil)
+    }
+
+    @Test func routingSnapshotUsesFirstEnabledDuplicateSourceMapping_firstEnabled_duplicateSource() {
+        let vendor = Vendor(name: "DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode", apiKey: "dash-test-key")
+        let firstEnabled = ModelMapping(sourceModel: "claude-haiku-4-5", targetModel: "qwen-turbo", targetVendorID: vendor.id)
+        let secondEnabled = ModelMapping(sourceModel: "claude-haiku-4-5", targetModel: "qwen-plus", targetVendorID: vendor.id)
+        let client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
+        let config = AppConfig(vendors: [vendor], clients: [client], modelMappings: [firstEnabled, secondEnabled])
+        let snapshot = RoutingSnapshot(from: config, for: client)
+
+        let (result, _) = snapshot.resolve(model: "claude-haiku-4-5", originalAPIKey: "original-key")
+        guard case .routed(let target) = result else {
+            Issue.record("Expected .routed, got \(result)")
+            return
+        }
+        #expect(target.targetModel == "qwen-turbo")
+    }
+
+    @Test func routingSnapshotUsesSecondDuplicateSourceMappingWhenFirstDisabled_duplicateSource() {
+        let vendor = Vendor(name: "DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode", apiKey: "dash-test-key")
+        let firstDisabled = ModelMapping(
+            sourceModel: "claude-haiku-4-5",
+            targetModel: "qwen-turbo",
+            targetVendorID: vendor.id,
+            isEnabled: false
+        )
+        let secondEnabled = ModelMapping(sourceModel: "claude-haiku-4-5", targetModel: "qwen-plus", targetVendorID: vendor.id)
+        let client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
+        let config = AppConfig(vendors: [vendor], clients: [client], modelMappings: [firstDisabled, secondEnabled])
+        let snapshot = RoutingSnapshot(from: config, for: client)
+
+        let (result, _) = snapshot.resolve(model: "claude-haiku-4-5", originalAPIKey: "original-key")
+        guard case .routed(let target) = result else {
+            Issue.record("Expected .routed, got \(result)")
+            return
+        }
+        #expect(target.targetModel == "qwen-plus")
     }
 
     // MARK: - RoutingSnapshot: different client uses different defaultUpstream
@@ -731,5 +919,13 @@ struct ModelProxyTests {
         #expect(summary.otherBlockCount == 0)
         #expect(summary.topLevelThinkingType == "enabled")
         #expect(summary.topLevelThinkingBudget == 32000)
+    }
+
+    private func expectDecodeFailure<T: Decodable>(_ type: T.Type, from json: String) {
+        do {
+            _ = try JSONDecoder().decode(type, from: Data(json.utf8))
+            Issue.record("Expected \(type) decode to fail")
+        } catch {
+        }
     }
 }
