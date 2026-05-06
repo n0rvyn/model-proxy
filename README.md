@@ -42,6 +42,7 @@ Global routing rules then map source model IDs such as `claude-haiku-4-5` to ven
   - passthrough to the client's default upstream
   - route all unmapped models to a chosen vendor
   - block unmapped models with HTTP 403
+- routing rules can be enabled or disabled without deleting the rule
 - optional backup target per routing rule for failover
 - API key replacement for routed requests
 - top-level `model` field replacement without rewriting the rest of the JSON body
@@ -187,6 +188,7 @@ Example shape:
       "sourceModel": "claude-haiku-4-5",
       "targetModel": "qwen-plus",
       "targetVendorID": "VENDOR-UUID",
+      "isEnabled": true,
       "backupTargetModel": "qwen-max",
       "backupTargetVendorID": "BACKUP-VENDOR-UUID"
     }
@@ -281,4 +283,4 @@ Built for developers who switch between multiple model providers in daily tool w
 
 ## Status
 
-This README reflects the codebase as of March 9, 2026.
+This README reflects the codebase as of May 6, 2026.
