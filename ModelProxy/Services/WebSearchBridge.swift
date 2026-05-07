@@ -11,6 +11,7 @@ enum WebSearchBridgeError: Error, Equatable {
 
 struct WebSearchBridgeResult: Sendable {
     let clientResponse: ReplayableBranchResponse
+    let webSearchRequestCount: Int
     let inputTokens: Int
     let outputTokens: Int
     let assistantTurn: PortableAssistantTurn?
@@ -35,13 +36,21 @@ enum WebSearchBridge {
         let maxResults: Int
     }
 
+    private struct SearchObservation: Sendable {
+        let toolCall: ToolCall
+        let results: [WebSearchResult]
+    }
+
     struct StepOutcome: Sendable {
         let assistantMessage: [String: Any]
         let toolCalls: [ToolCall]
     }
 
     private static let bridgedToolName = "web_search"
-    private static let bridgedToolType = "web_search_20250305"
+    private static let bridgedToolTypes: Set<String> = [
+        "web_search_20250305",
+        "web_search_20260209"
+    ]
 
     nonisolated static func shouldHandle(
         bodyData: Data,
@@ -56,7 +65,8 @@ enum WebSearchBridge {
             return false
         }
         return tools.contains { tool in
-            (tool["type"] as? String)?.lowercased() == bridgedToolType
+            guard let type = (tool["type"] as? String)?.lowercased() else { return false }
+            return bridgedToolTypes.contains(type)
         }
     }
 
@@ -69,12 +79,16 @@ enum WebSearchBridge {
         }
 
         let maxUses = tools
-            .filter { ($0["type"] as? String)?.lowercased() == bridgedToolType }
+            .filter { tool in
+                guard let type = (tool["type"] as? String)?.lowercased() else { return false }
+                return bridgedToolTypes.contains(type)
+            }
             .compactMap { $0["max_uses"] as? Int }
             .max() ?? 3
 
         let transformedTools = tools.compactMap { tool -> [String: Any]? in
-            if (tool["type"] as? String)?.lowercased() == bridgedToolType {
+            if let type = (tool["type"] as? String)?.lowercased(),
+               bridgedToolTypes.contains(type) {
                 return bridgedFunctionToolDefinition()
             }
             return tool
@@ -102,6 +116,7 @@ enum WebSearchBridge {
         var workingJSON = try jsonObject(preparedRequest.bodyData)
         var accumulatedInputTokens = 0
         var accumulatedOutputTokens = 0
+        var searchObservations: [SearchObservation] = []
 
         for _ in 0..<preparedRequest.maxUses {
             let response = try await performModelTurn(
@@ -121,38 +136,60 @@ enum WebSearchBridge {
             let normalized = try portableNormalizer.normalizeJSONBody(response.bodyData)
 
             guard !outcome.toolCalls.isEmpty else {
-                let finalBodyData = try bodyDataByReplacingUsage(
+                let branchBodyData = try bodyDataByReplacingUsage(
                     in: normalized.bodyData,
                     inputTokens: accumulatedInputTokens,
-                    outputTokens: accumulatedOutputTokens
+                    outputTokens: accumulatedOutputTokens,
+                    webSearchRequestCount: nil
                 )
+                let clientBodyData = try bodyDataByReplacingUsage(
+                    in: bodyDataByInsertingClientSearchBlocks(
+                        in: branchBodyData,
+                        observations: searchObservations
+                    ),
+                    inputTokens: accumulatedInputTokens,
+                    outputTokens: accumulatedOutputTokens,
+                    webSearchRequestCount: searchObservations.count
+                )
+                let trafficRequestKind = TrafficEntry.RequestKind.webSearchBridge(searchCount: searchObservations.count)
                 let clientResponse = preparedRequest.streamRequested
-                    ? try synthesizeSSE(from: finalBodyData, inputTokens: accumulatedInputTokens, outputTokens: accumulatedOutputTokens)
+                    ? try synthesizeSSE(
+                        from: clientBodyData,
+                        inputTokens: accumulatedInputTokens,
+                        outputTokens: accumulatedOutputTokens,
+                        webSearchRequestCount: searchObservations.count,
+                        trafficRequestKind: trafficRequestKind
+                    )
                     : ReplayableBranchResponse(
                         statusCode: 200,
                         headers: [("content-type", "application/json")],
-                        bodyChunks: [finalBodyData]
+                        bodyChunks: [clientBodyData],
+                        trafficRequestKind: trafficRequestKind
                     )
-                let assistantTurn = try portableNormalizer.normalizeJSONBody(finalBodyData).assistantTurn
+                let assistantTurn = try portableNormalizer.normalizeJSONBody(branchBodyData).assistantTurn
                 return WebSearchBridgeResult(
                     clientResponse: clientResponse,
+                    webSearchRequestCount: searchObservations.count,
                     inputTokens: accumulatedInputTokens,
                     outputTokens: accumulatedOutputTokens,
                     assistantTurn: assistantTurn
                 )
             }
 
-            let resultBlocks = try await outcome.toolCalls.mapAsync { toolCall in
+            var resultBlocks: [[String: Any]] = []
+            resultBlocks.reserveCapacity(outcome.toolCalls.count)
+            for toolCall in outcome.toolCalls {
                 let results = try await provider.search(
                     query: toolCall.query,
                     maxResults: toolCall.maxResults,
                     httpClient: httpClient
                 )
-                return [
+                searchObservations.append(SearchObservation(toolCall: toolCall, results: results))
+                resultBlocks.append([
                     "type": "tool_result",
                     "tool_use_id": toolCall.id,
                     "content": formatSearchResults(results, query: toolCall.query)
-                ] as [String: Any]
+                ])
             }
 
             let messages = (workingJSON["messages"] as? [[String: Any]]) ?? []
@@ -202,7 +239,9 @@ enum WebSearchBridge {
     nonisolated static func synthesizeSSE(
         from finalBodyData: Data,
         inputTokens: Int,
-        outputTokens: Int
+        outputTokens: Int,
+        webSearchRequestCount: Int? = nil,
+        trafficRequestKind: TrafficEntry.RequestKind? = nil
     ) throws -> ReplayableBranchResponse {
         let json = try jsonObject(finalBodyData)
         guard let contentBlocks = json["content"] as? [[String: Any]] else {
@@ -266,14 +305,15 @@ enum WebSearchBridge {
                         "index": index
                     ]
                 ))
-            case "tool_use":
+            case "tool_use", "server_tool_use":
+                let contentType = lowerType == "server_tool_use" ? "server_tool_use" : "tool_use"
                 chunks.append(try eventData(
                     name: "content_block_start",
                     payload: [
                         "type": "content_block_start",
                         "index": index,
                         "content_block": [
-                            "type": "tool_use",
+                            "type": contentType,
                             "id": block["id"] as? String ?? "",
                             "name": block["name"] as? String ?? "",
                             "input": [:]
@@ -299,11 +339,35 @@ enum WebSearchBridge {
                         "index": index
                     ]
                 ))
+            case "web_search_tool_result":
+                chunks.append(try eventData(
+                    name: "content_block_start",
+                    payload: [
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": block
+                    ]
+                ))
+                chunks.append(try eventData(
+                    name: "content_block_stop",
+                    payload: [
+                        "type": "content_block_stop",
+                        "index": index
+                    ]
+                ))
             default:
                 continue
             }
         }
 
+        var deltaUsage: [String: Any] = [
+            "output_tokens": outputTokens
+        ]
+        if let webSearchRequestCount {
+            deltaUsage["server_tool_use"] = [
+                "web_search_requests": webSearchRequestCount
+            ]
+        }
         chunks.append(try eventData(
             name: "message_delta",
             payload: [
@@ -312,9 +376,7 @@ enum WebSearchBridge {
                     "stop_reason": json["stop_reason"] as? String ?? "end_turn",
                     "stop_sequence": NSNull()
                 ],
-                "usage": [
-                    "output_tokens": outputTokens
-                ]
+                "usage": deltaUsage
             ]
         ))
         chunks.append(try eventData(name: "message_stop", payload: ["type": "message_stop"]))
@@ -322,7 +384,8 @@ enum WebSearchBridge {
         return ReplayableBranchResponse(
             statusCode: 200,
             headers: [("content-type", "text/event-stream")],
-            bodyChunks: chunks
+            bodyChunks: chunks,
+            trafficRequestKind: trafficRequestKind
         )
     }
 
@@ -394,14 +457,60 @@ enum WebSearchBridge {
     private nonisolated static func bodyDataByReplacingUsage(
         in responseBody: Data,
         inputTokens: Int,
-        outputTokens: Int
+        outputTokens: Int,
+        webSearchRequestCount: Int?
     ) throws -> Data {
         var json = try jsonObject(responseBody)
-        json["usage"] = [
+        var usage: [String: Any] = [
             "input_tokens": inputTokens,
             "output_tokens": outputTokens
         ]
+        if let webSearchRequestCount {
+            usage["server_tool_use"] = [
+                "web_search_requests": webSearchRequestCount
+            ]
+        }
+        json["usage"] = usage
         return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+    }
+
+    private nonisolated static func bodyDataByInsertingClientSearchBlocks(
+        in responseBody: Data,
+        observations: [SearchObservation]
+    ) throws -> Data {
+        guard !observations.isEmpty else { return responseBody }
+        var json = try jsonObject(responseBody)
+        let existingContent = (json["content"] as? [[String: Any]]) ?? []
+        json["content"] = clientSearchBlocks(from: observations) + existingContent
+        return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+    }
+
+    private nonisolated static func clientSearchBlocks(
+        from observations: [SearchObservation]
+    ) -> [[String: Any]] {
+        observations.flatMap { observation in
+            [
+                [
+                    "type": "server_tool_use",
+                    "id": observation.toolCall.id,
+                    "name": bridgedToolName,
+                    "input": [
+                        "query": observation.toolCall.query
+                    ]
+                ],
+                [
+                    "type": "web_search_tool_result",
+                    "tool_use_id": observation.toolCall.id,
+                    "content": observation.results.map { result in
+                        [
+                            "type": "web_search_result",
+                            "title": result.title,
+                            "url": result.url
+                        ]
+                    }
+                ]
+            ]
+        }
     }
 
     private nonisolated static func eventData(name: String, payload: [String: Any]) throws -> Data {
@@ -418,18 +527,5 @@ enum WebSearchBridge {
             throw WebSearchBridgeError.invalidRequest
         }
         return json
-    }
-}
-
-private extension Array {
-    func mapAsync<T: Sendable>(
-        _ transform: @Sendable (Element) async throws -> T
-    ) async throws -> [T] {
-        var results: [T] = []
-        results.reserveCapacity(count)
-        for element in self {
-            results.append(try await transform(element))
-        }
-        return results
     }
 }
