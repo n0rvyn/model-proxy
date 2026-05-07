@@ -10,6 +10,19 @@ struct ReplayableBranchResponse: Sendable {
     let statusCode: Int
     let headers: [(String, String)]
     let bodyChunks: [Data]
+    let trafficRequestKind: TrafficEntry.RequestKind?
+
+    init(
+        statusCode: Int,
+        headers: [(String, String)],
+        bodyChunks: [Data],
+        trafficRequestKind: TrafficEntry.RequestKind? = nil
+    ) {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.bodyChunks = bodyChunks
+        self.trafficRequestKind = trafficRequestKind
+    }
 }
 
 struct BranchRequestLease: Sendable, Equatable {

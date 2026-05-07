@@ -16,6 +16,7 @@ struct TrafficEntry: Identifiable, Sendable {
         case countTokens
         case auxiliary(endpointPath: String)
         case blocked
+        case webSearchBridge(searchCount: Int)
 
         var endpointLabel: String {
             switch self {
@@ -27,12 +28,14 @@ struct TrafficEntry: Identifiable, Sendable {
                 return endpointPath
             case .blocked:
                 return "blocked"
+            case .webSearchBridge:
+                return "web_search"
             }
         }
 
         var isAuxiliary: Bool {
             switch self {
-            case .generation, .blocked:
+            case .generation, .blocked, .webSearchBridge:
                 return false
             case .countTokens, .auxiliary:
                 return true
@@ -40,7 +43,12 @@ struct TrafficEntry: Identifiable, Sendable {
         }
 
         var shouldDisplayTPS: Bool {
-            self == .generation
+            switch self {
+            case .generation:
+                return true
+            case .countTokens, .auxiliary, .blocked, .webSearchBridge:
+                return false
+            }
         }
     }
 
@@ -73,6 +81,60 @@ struct TrafficEntry: Identifiable, Sendable {
         self.duration = duration
         self.outputTokens = outputTokens
         self.timestamp = timestamp
+    }
+
+    var displayModelLabel: String {
+        switch requestKind {
+        case .webSearchBridge(let searchCount):
+            if searchCount == 1 {
+                return "Web Search - \(model)"
+            }
+            return "Web Search (\(searchCount)) - \(model)"
+        case .generation, .countTokens, .auxiliary, .blocked:
+            return model
+        }
+    }
+
+    var routeDisplayLabel: String {
+        switch routeType {
+        case .passthrough:
+            return "pass"
+        case .mapped(let targetModel):
+            return targetModel
+        case .blocked:
+            return "blocked"
+        }
+    }
+
+    var durationDisplayText: String {
+        guard let duration else { return "-" }
+        if duration < 1 {
+            return String(format: "%.1fs", duration)
+        } else if duration < 60 {
+            return "\(Int(duration))s"
+        } else {
+            return String(format: "%.1fm", duration / 60)
+        }
+    }
+
+    var tpsDisplayText: String {
+        if case .webSearchBridge = requestKind {
+            return "-"
+        }
+        guard requestKind.shouldDisplayTPS else { return "\u{2014}" }
+        guard let outputTokens, outputTokens > 0,
+              let duration, duration > 0 else { return "\u{2014}" }
+        return "\(Int(Double(outputTokens) / duration))"
+    }
+
+    var accessibilitySummary: String {
+        switch requestKind {
+        case .webSearchBridge(let searchCount):
+            let countLabel = searchCount == 1 ? "1 search" : "\(searchCount) searches"
+            return "Web Search, \(model), \(countLabel), \(routeDisplayLabel), HTTP \(httpStatus), \(durationDisplayText), \(tpsDisplayText) t/s"
+        case .generation, .countTokens, .auxiliary, .blocked:
+            return "\(model), \(routeDisplayLabel), HTTP \(httpStatus), \(durationDisplayText), \(tpsDisplayText) t/s"
+        }
     }
 }
 
