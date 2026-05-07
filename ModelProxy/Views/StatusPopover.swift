@@ -356,14 +356,14 @@ private struct TrafficRowView: View {
                 .fill(statusColor)
                 .frame(width: 6, height: 6)
 
-            Text(entry.model)
+            Text(entry.displayModelLabel)
                 .font(.caption2)
                 .foregroundStyle(entry.requestKind.isAuxiliary ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(routeLabel)
+            Text(entry.routeDisplayLabel)
                 .font(.caption2)
                 .foregroundStyle(entry.requestKind.isAuxiliary ? .tertiary : .secondary)
                 .lineLimit(1)
@@ -373,12 +373,12 @@ private struct TrafficRowView: View {
                 .foregroundStyle(statusColor)
                 .frame(width: 28, alignment: .trailing)
 
-            Text(durationText)
+            Text(entry.durationDisplayText)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
                 .frame(width: 30, alignment: .trailing)
 
-            Text(tpsText)
+            Text(entry.tpsDisplayText)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
                 .frame(width: 26, alignment: .trailing)
@@ -387,7 +387,7 @@ private struct TrafficRowView: View {
         .padding(.vertical, 3)
         .opacity(entry.requestKind.isAuxiliary ? 0.82 : 1)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(entry.model), \(routeLabel), HTTP \(entry.httpStatus), \(durationText), \(tpsText) t/s")
+        .accessibilityLabel(entry.accessibilitySummary)
     }
 
     private var statusColor: Color {
@@ -398,31 +398,6 @@ private struct TrafficRowView: View {
         }
     }
 
-    private var routeLabel: String {
-        switch entry.routeType {
-        case .passthrough: return "pass"
-        case .mapped(let targetModel): return targetModel
-        case .blocked: return "blocked"
-        }
-    }
-
-    private var tpsText: String {
-        guard entry.requestKind.shouldDisplayTPS else { return "—" }
-        guard let tokens = entry.outputTokens, tokens > 0,
-              let d = entry.duration, d > 0 else { return "—" }
-        return "\(Int(Double(tokens) / d))"
-    }
-
-    private var durationText: String {
-        guard let d = entry.duration else { return "-" }
-        if d < 1 {
-            return String(format: "%.1fs", d)
-        } else if d < 60 {
-            return "\(Int(d))s"
-        } else {
-            return String(format: "%.1fm", d / 60)
-        }
-    }
 }
 
 // Note: running state with bound ports requires runtime start;
@@ -435,6 +410,7 @@ private struct TrafficRowView: View {
         .environment({
             let log = TrafficLog()
             log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .mapped(targetModel: "qwen-plus"), requestKind: .generation, httpStatus: 200, duration: 12.3, outputTokens: 520))
+            log.append(TrafficEntry(model: "claude-sonnet-4-6", routeType: .mapped(targetModel: "MiniMax-M2.7"), requestKind: .webSearchBridge(searchCount: 1), httpStatus: 200, duration: 1.2))
             log.append(TrafficEntry(model: "claude-opus-4-6", routeType: .passthrough, requestKind: .countTokens, httpStatus: 200, duration: 0.3))
             log.append(TrafficEntry(model: "gpt-4o", routeType: .blocked, requestKind: .blocked, httpStatus: 403))
             return log

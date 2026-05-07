@@ -169,7 +169,7 @@ enum ProxyForwarder {
                 let entry = TrafficEntry(
                     model: model,
                     routeType: entryRouteType,
-                    requestKind: requestKind,
+                    requestKind: cachedResponse.trafficRequestKind ?? requestKind,
                     httpStatus: cachedResponse.statusCode,
                     duration: duration
                 )
@@ -228,7 +228,7 @@ enum ProxyForwarder {
                     let entry = TrafficEntry(
                         model: model,
                         routeType: entryRouteType,
-                        requestKind: requestKind,
+                        requestKind: replay.trafficRequestKind ?? requestKind,
                         httpStatus: replay.statusCode,
                         duration: duration
                     )
@@ -354,7 +354,7 @@ enum ProxyForwarder {
                 let entry = TrafficEntry(
                     model: model,
                     routeType: entryRouteType,
-                    requestKind: requestKind,
+                    requestKind: .webSearchBridge(searchCount: bridgeResult.webSearchRequestCount),
                     httpStatus: 200,
                     duration: duration,
                     outputTokens: bridgeResult.outputTokens
@@ -374,7 +374,7 @@ enum ProxyForwarder {
                 let entry = TrafficEntry(
                     model: model,
                     routeType: entryRouteType,
-                    requestKind: requestKind,
+                    requestKind: .webSearchBridge(searchCount: 0),
                     httpStatus: 502,
                     duration: duration
                 )
