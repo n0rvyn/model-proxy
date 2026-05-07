@@ -872,6 +872,24 @@ struct ModelProxyTests {
         #expect(replaced.originalLength == replaced.newLength)
     }
 
+    // MARK: - Traffic display semantics
+
+    @Test func webSearchBridgeRequestKindUsesDedicatedDisplaySemantics() {
+        let kind = TrafficEntry.RequestKind.webSearchBridge(searchCount: 2)
+        #expect(kind.endpointLabel == "web_search")
+        #expect(kind.isAuxiliary == false)
+        #expect(kind.shouldDisplayTPS == false)
+        let entry = TrafficEntry(
+            model: "claude-sonnet-4-6",
+            routeType: .mapped(targetModel: "MiniMax-M2.7"),
+            requestKind: kind,
+            httpStatus: 200,
+            duration: 1.2
+        )
+        #expect(entry.displayModelLabel == "Web Search (2) - claude-sonnet-4-6")
+        #expect(entry.accessibilitySummary == "Web Search, claude-sonnet-4-6, 2 searches, MiniMax-M2.7, HTTP 200, 1s, - t/s")
+    }
+
     // MARK: - App launch smoke
 
     @Test func hostAppBundleHasExpectedIdentity() throws {

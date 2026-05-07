@@ -24,6 +24,7 @@ struct BranchRequestCoordinatorTests {
             headers: [("content-type", "application/json")],
             bodyChunks: [Data("{\"ok\":true}".utf8)]
         )
+        #expect(replay.trafficRequestKind == nil)
         await coordinator.complete(lease: leaderLease, replay: replay)
 
         let followerDecision = await followerTask.value
@@ -33,6 +34,37 @@ struct BranchRequestCoordinatorTests {
             #expect(cachedResponse.statusCode == replay.statusCode)
             #expect(cachedResponse.bodyChunks == replay.bodyChunks)
             #expect(cachedResponse.headers.contains { $0.0 == "content-type" && $0.1 == "application/json" })
+        default:
+            Issue.record("Expected replay decision"); throw TestAbort()
+        }
+    }
+
+    @Test func replayResponsePreservesTrafficRequestKind() async throws {
+        let coordinator = BranchRequestCoordinator()
+        let context = makeContext(hashes: ["m1"])
+        let firstDecision = await coordinator.acquire(context: context)
+        let leaderLease = switch firstDecision {
+        case .acquired(let lease): lease
+        default: Issue.record("Expected leader lease acquisition"); throw TestAbort()
+        }
+
+        let followerTask = Task {
+            await coordinator.acquire(context: context)
+        }
+        await Task.yield()
+
+        let replay = ReplayableBranchResponse(
+            statusCode: 200,
+            headers: [("content-type", "application/json")],
+            bodyChunks: [Data("{}".utf8)],
+            trafficRequestKind: .webSearchBridge(searchCount: 1)
+        )
+        await coordinator.complete(lease: leaderLease, replay: replay)
+
+        let followerDecision = await followerTask.value
+        switch followerDecision {
+        case .replay(let cachedResponse, _):
+            #expect(cachedResponse.trafficRequestKind == .webSearchBridge(searchCount: 1))
         default:
             Issue.record("Expected replay decision"); throw TestAbort()
         }

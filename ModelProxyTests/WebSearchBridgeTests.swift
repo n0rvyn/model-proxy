@@ -30,11 +30,13 @@ struct WebSearchBridgeTests {
             signingDomain: .anthropicOfficial,
             replayPolicy: .transparent
         )
-        let request = try requestBody(stream: true)
+        let request20250305 = try requestBody(stream: true, toolType: "web_search_20250305")
+        let request20260209 = try requestBody(stream: true, toolType: "web_search_20260209")
 
-        #expect(WebSearchBridge.shouldHandle(bodyData: request, target: mappedTarget, requestKind: .generation) == true)
-        #expect(WebSearchBridge.shouldHandle(bodyData: request, target: passthroughTarget, requestKind: .generation) == false)
-        #expect(WebSearchBridge.shouldHandle(bodyData: request, target: mappedTarget, requestKind: .countTokens) == false)
+        #expect(WebSearchBridge.shouldHandle(bodyData: request20250305, target: mappedTarget, requestKind: .generation) == true)
+        #expect(WebSearchBridge.shouldHandle(bodyData: request20260209, target: mappedTarget, requestKind: .generation) == true)
+        #expect(WebSearchBridge.shouldHandle(bodyData: request20250305, target: passthroughTarget, requestKind: .generation) == false)
+        #expect(WebSearchBridge.shouldHandle(bodyData: request20250305, target: mappedTarget, requestKind: .countTokens) == false)
     }
 
     @Test func prepareRequestRewritesServerToolToFunctionToolAndDisablesStreaming() throws {
@@ -108,17 +110,30 @@ struct WebSearchBridgeTests {
         #expect((toolResults.first?["content"] as? String)?.contains("https://example.com/swift-testing") == true)
         #expect(result.inputTokens == 22)
         #expect(result.outputTokens == 6)
+        #expect(result.webSearchRequestCount == 1)
         #expect(result.clientResponse.statusCode == 200)
+        #expect(result.clientResponse.trafficRequestKind == .webSearchBridge(searchCount: 1))
         #expect(result.clientResponse.headers.contains { $0.0 == "content-type" && $0.1 == "application/json" })
 
         let finalBody = try #require(result.clientResponse.bodyChunks.first)
         let finalJSON = try #require(try JSONSerialization.jsonObject(with: finalBody) as? [String: Any])
         let content = try #require(finalJSON["content"] as? [[String: Any]])
-        #expect(content.first?["text"] as? String == "Found useful Swift testing references.")
+        let contentTypes = content.compactMap { $0["type"] as? String }
+        #expect(contentTypes.contains("server_tool_use"))
+        #expect(contentTypes.contains("web_search_tool_result"))
+        #expect(content.contains { $0["text"] as? String == "Found useful Swift testing references." })
         let usage = try #require(finalJSON["usage"] as? [String: Any])
         #expect(usage["input_tokens"] as? Int == 22)
         #expect(usage["output_tokens"] as? Int == 6)
-        #expect(result.assistantTurn != nil)
+        let serverToolUse = try #require(usage["server_tool_use"] as? [String: Any])
+        #expect(serverToolUse["web_search_requests"] as? Int == 1)
+        let assistantTurn = try #require(result.assistantTurn)
+        let fullMessage = String(data: assistantTurn.fullMessageData, encoding: .utf8) ?? ""
+        let portableMessage = String(data: assistantTurn.portableMessageData, encoding: .utf8) ?? ""
+        #expect(fullMessage.contains("server_tool_use") == false)
+        #expect(fullMessage.contains("web_search_tool_result") == false)
+        #expect(portableMessage.contains("server_tool_use") == false)
+        #expect(portableMessage.contains("web_search_tool_result") == false)
     }
 
     // MARK: - Provider Response Parsing
@@ -189,11 +204,18 @@ struct WebSearchBridgeTests {
 
     @Test func synthesizeSSEProducesValidEventStream() throws {
         let body = try assistantResponseBody(content: [
-            ["type": "text", "text": "Here are the results."],
-            ["type": "tool_use", "id": "toolu_1", "name": "web_search", "input": ["query": "swift"]]
+            ["type": "server_tool_use", "id": "toolu_1", "name": "web_search", "input": ["query": "swift"]],
+            [
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [
+                    ["type": "web_search_result", "title": "Swift", "url": "https://swift.org"]
+                ]
+            ],
+            ["type": "text", "text": "Here are the results."]
         ], usage: ["input_tokens": 50, "output_tokens": 20])
 
-        let response = try WebSearchBridge.synthesizeSSE(from: body, inputTokens: 50, outputTokens: 20)
+        let response = try WebSearchBridge.synthesizeSSE(from: body, inputTokens: 50, outputTokens: 20, webSearchRequestCount: 1)
         #expect(response.statusCode == 200)
         #expect(response.headers.contains { $0.0 == "content-type" && $0.1 == "text/event-stream" })
 
@@ -210,6 +232,9 @@ struct WebSearchBridgeTests {
         #expect(eventNames.contains("content_block_delta"))
         #expect(eventNames.contains("content_block_stop"))
         #expect(eventNames.contains("message_delta"))
+        #expect(text.contains("server_tool_use"))
+        #expect(text.contains("web_search_tool_result"))
+        #expect(text.contains("\"web_search_requests\":1"))
 
         // Verify usage tokens in message_start and message_delta
         let dataLines = text.components(separatedBy: "\n").filter { $0.hasPrefix("data: ") }
@@ -226,6 +251,8 @@ struct WebSearchBridgeTests {
         )
         let deltaUsage = try #require(deltaJSON["usage"] as? [String: Any])
         #expect(deltaUsage["output_tokens"] as? Int == 20)
+        let deltaServerToolUse = try #require(deltaUsage["server_tool_use"] as? [String: Any])
+        #expect(deltaServerToolUse["web_search_requests"] as? Int == 1)
     }
 
     @Test func executeThrowsMaxUsesExceeded() async throws {
@@ -343,11 +370,17 @@ struct WebSearchBridgeTests {
         #expect(searchQueries.contains("swift actors"))
         #expect(result.inputTokens == 35)
         #expect(result.outputTokens == 11)
+        #expect(result.webSearchRequestCount == 2)
+        #expect(result.clientResponse.trafficRequestKind == .webSearchBridge(searchCount: 2))
 
         let finalBody = try #require(result.clientResponse.bodyChunks.first)
         let finalJSON = try #require(try JSONSerialization.jsonObject(with: finalBody) as? [String: Any])
         let content = try #require(finalJSON["content"] as? [[String: Any]])
-        #expect(content.first?["text"] as? String == "Found references on both topics.")
+        #expect(content.filter { ($0["type"] as? String) == "web_search_tool_result" }.count == 2)
+        #expect(content.contains { $0["text"] as? String == "Found references on both topics." })
+        let usage = try #require(finalJSON["usage"] as? [String: Any])
+        let serverToolUse = try #require(usage["server_tool_use"] as? [String: Any])
+        #expect(serverToolUse["web_search_requests"] as? Int == 2)
     }
 
     @Test func sanitizeToolsForVendorRemovesWebSearchAndKeepsOthers() throws {
@@ -376,7 +409,7 @@ private struct CountingWebSearchProvider: WebSearchBridgeProviding {
     }
 }
 
-private func requestBody(stream: Bool, maxUses: Int = 4) throws -> Data {
+private func requestBody(stream: Bool, maxUses: Int = 4, toolType: String = "web_search_20250305") throws -> Data {
     try JSONSerialization.data(withJSONObject: [
         "model": "claude-sonnet-4-6",
         "stream": stream,
@@ -384,7 +417,7 @@ private func requestBody(stream: Bool, maxUses: Int = 4) throws -> Data {
             ["role": "user", "content": "Search for Swift testing references"]
         ],
         "tools": [
-            ["type": "web_search_20250305", "name": "web_search", "max_uses": maxUses],
+            ["type": toolType, "name": "web_search", "max_uses": maxUses],
             [
                 "name": "bash",
                 "input_schema": [
