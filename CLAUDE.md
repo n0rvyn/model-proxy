@@ -86,3 +86,27 @@ See `~/.claude/CLAUDE.md` for general rules.
 2. Check `docs/03-decisions/` - may already have a decision
 3. Check `docs/05-features/` - expected behavior and key code locations
 4. Check `docs/09-lessons-learned/` - may be a known issue
+
+## Runtime Inspection
+
+The app is **sandboxed** (`com.90percent.ModelProxy`). At runtime, `AppPaths.appSupport`
+resolves into the container, NOT the bare `~/Library/Application Support/...`:
+
+```
+~/Library/Containers/com.90percent.ModelProxy/Data/Library/Application Support/ModelProxy/
+  ├── logs/modelproxy-YYYY-MM-DD.log   (daily log; NO request/response bodies, by policy)
+  ├── config.json                      (vendors, keys)
+  └── lineages.json                    (branch/lineage cache)
+```
+
+- **These files are TCC-locked.** Claude's shell gets `Operation not permitted` on
+  `head`/`cp`/`ls` even though perms are `-rw-r--r--` — it's macOS TCC, not Unix perms.
+  Read them via the app's log panel, a user-run `sudo`, or terminal Full Disk Access.
+  Don't burn turns retrying file reads.
+- **os_log is empty.** Subsystem `com.modelproxy.app` persists nothing
+  (`log show --predicate 'subsystem == "com.modelproxy.app"'`). Not a debugging source.
+- **Determine a model's route by probing the live proxy, not by guessing:**
+  `curl localhost:9090/v1/messages -H 'x-api-key: probe' -H 'anthropic-version: 2023-06-01' -d '{"model":"<m>","max_tokens":8,"messages":[{"role":"user","content":"x"}]}'`
+  — an Anthropic-format error (`request_id: req_011C...`) means that model is **passthrough
+  to Anthropic**; a different vendor/error means it's mapped. See
+  `docs/09-lessons-learned/2026-06-11-proxy-transform-diagnosis.md` for the tool-call transform gating table.
