@@ -39,7 +39,7 @@ System tray status, traffic log, token stats.
 
 | Technology | Version | Purpose |
 |-----------|---------|---------|
-| macOS | 14+ (Sonoma) | Minimum support |
+| macOS | 15.6+ (Sequoia) | Minimum support |
 | Swift | 6 | Language |
 | SwiftUI | - | UI framework |
 | SwiftNIO | 2.x | HTTP proxy server |

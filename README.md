@@ -3,7 +3,7 @@
 > macOS menu bar app for routing Claude Code and Codex requests to different upstream model vendors.
 
 ![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift)
-![macOS](https://img.shields.io/badge/macOS-14.0+-86909B?logo=apple)
+![macOS](https://img.shields.io/badge/macOS-15.6+-86909B?logo=apple)
 ![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-007AFF)
 
 ## What It Is
@@ -220,7 +220,7 @@ API keys are stored in plaintext in the local config file. That is the current p
 | UI | SwiftUI + MenuBarExtra |
 | Proxy server | SwiftNIO + NIOHTTP1 + AsyncHTTPClient |
 | Config storage | JSON files in Application Support |
-| Minimum OS | macOS 14.0+ |
+| Minimum OS | macOS 15.6+ |
 
 ## Development
 

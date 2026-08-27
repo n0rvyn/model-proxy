@@ -20,22 +20,7 @@ All project documents use `docs/00-AI-CONTEXT.md` as the single source of truth.
 | Change history | `docs/07-changelog/` |
 | Lessons learned | `docs/09-lessons-learned/` |
 
-## Plan Execution Rules
-
-When executing plan tasks with these fields:
-
-| Field | Action |
-|------|------|
-| `Design ref:` | Read referenced design doc section before implementation |
-| `Expected values:` | Verify each value matches after implementation |
-| `Replaces:` | Grep old code references, confirm all handled |
-| `Data flow:` | Trace path end-to-end, confirm connected |
-| `Quality markers:` | Use specified algorithm/data structure, don't simplify |
-| `Verify after:` | Execute each check after implementation |
-
-When encountering gray areas not covered by the plan: **ask user, don't improvise**.
-
-### Document After Completing Features
+## Document After Completing Features
 
 **Trigger:**
 - Completed multi-file feature implementation
@@ -44,7 +29,7 @@ When encountering gray areas not covered by the plan: **ask user, don't improvis
 
 **Location:** `docs/05-features/feature-name.md`
 
-**Trigger method:** After completion, use `/handoff` or ask user
+**Trigger method:** After completion, ask the user; for a full session handoff, prompt the user to run `/handoff` (that skill is `disable-model-invocation`, so the model cannot invoke it itself)
 
 ## Project-Specific Constraints
 
@@ -59,12 +44,12 @@ Required:
 - Streaming (SSE) response relay must forward chunks immediately, no buffering
 - SSE response transforms must commit the same guarded/repaired content that is relayed to the client; add regression tests for both relay output and stored lineage data
 - API keys stored in ~/Library/Application Support/ModelProxy/config.json, not Keychain (simplicity for personal tool)
-- macOS 14+ (Sonoma) minimum deployment target
+- macOS 15.6+ (Sequoia) minimum deployment target (`MACOSX_DEPLOYMENT_TARGET = 15.6`)
 ```
 
 ## Tech Stack
 
-- macOS 14+, Swift 6, SwiftUI
+- macOS 15.6+, Swift 6, SwiftUI
 - SwiftNIO + NIOHTTP1 for HTTP proxy server
 - AsyncHTTPClient or URLSession for upstream requests
 - UserDefaults + JSON for config persistence
