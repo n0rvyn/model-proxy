@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct GeneralTabView: View {
@@ -6,6 +7,7 @@ struct GeneralTabView: View {
     @Environment(ProxyServer.self) private var proxyServer
 
     @State private var showAPIKey = false
+    @State private var showMailFallback = false
 
     var body: some View {
         Form {
@@ -39,11 +41,53 @@ struct GeneralTabView: View {
                         .font(.caption)
                 }
             }
+
+            aboutSection
         }
         .formStyle(.grouped)
         .padding()
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             loginItemService.refreshStatus()
+        }
+        .alert("No Mail App Available", isPresented: $showMailFallback) {
+            Button("OK") { }
+        } message: {
+            Text("The support address \(FeedbackMail.recipient) was copied to the clipboard.")
+        }
+    }
+
+    // MARK: - About
+
+    private var aboutSection: some View {
+        Section("About") {
+            LabeledContent("Version", value: FeedbackMail.versionDisplay)
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Feedback & Support")
+                    Text("Opens your mail app with the app and macOS version filled in. No configuration, API keys, or request data is included.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("Send Feedback") {
+                    sendFeedback()
+                }
+                .buttonStyle(.mpInline)
+                .accessibilityLabel("Send Feedback")
+                .accessibilityHint("Opens a prefilled email to \(FeedbackMail.recipient).")
+            }
+        }
+    }
+
+    private func sendFeedback() {
+        guard let url = FeedbackMail.currentMailtoURL(), NSWorkspace.shared.open(url) else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(FeedbackMail.recipient, forType: .string)
+            showMailFallback = true
+            return
         }
     }
 
