@@ -1,7 +1,7 @@
 # Xcode
 *.xcuserstate
 !ModelProxy.xcodeproj
-# xcuserdata/
+xcuserdata/
 DerivedData/
 *.xccheckout
 *.moved-aside
@@ -27,3 +27,8 @@ Packages/
 /Icons
 .claude/
 .plan/
+
+# ASC / ASO working material (keyword allocation, competitive research) —
+# repo is public; this stays local. See private/asc/.
+private/
+__pycache__/
