@@ -19,6 +19,20 @@ used by five other apps.
 locked, so the switch happens on the next submission: change Privacy Policy URL (App Info) and
 Support URL (Version) to the norvyn.com links above, then retire the Notion pages.
 
+**The Notion pages were cleaned in place on 2026-08-28**, so the URLs currently under review no
+longer name OpenAI. Seven blocks were patched across three pages, verified by read-back
+(block counts unchanged, zero occurrences of `openai` / `ChatGPT` / `DashScope` remaining):
+
+| Notion page | What was fixed |
+|---|---|
+| Privacy Policy | EN + CN "Data Sharing" paragraph — dropped the `(e.g., Anthropic, OpenAI, Alibaba Cloud)` list |
+| Support Page | EN + CN "Which AI providers are supported" — the false DashScope/OpenAI preset claim |
+| **Market** (this is the ASC **Marketing URL**) | EN + CN "Multi-Vendor Routing" bullet, **and** a stale 2.3-era keyword line that literally contained `openai` |
+
+⚠️ The Market page is easy to forget: `marketingUrl` is an ASC metadata field too, and that page
+carried two OpenAI mentions plus a verbatim keyword list. Any future metadata sweep must cover
+**all three** URLs (privacyPolicyUrl, supportUrl, marketingUrl), not just the first two.
+
 To republish after editing a file here:
 
 ```bash
