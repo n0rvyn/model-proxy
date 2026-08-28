@@ -36,9 +36,9 @@ API 密钥存储在您 Mac 本地的 `~/Library/Application Support/ModelProxy/c
 
 ### Which AI providers are supported? | 支持哪些 AI 服务商？
 
-Model Proxy supports any AI provider with an HTTP API. Pre-configured defaults include Anthropic, OpenAI, and Alibaba Cloud (DashScope). You can add custom vendors with any endpoint.
+Model Proxy supports any AI provider with an HTTP API. The app ships with no provider preset and no bundled API key: you add each vendor yourself by entering its endpoint URL and your own key.
 
-Model Proxy 支持任何具有 HTTP API 的 AI 服务商。预配置的默认服务商包括 Anthropic、OpenAI 和阿里云（DashScope）。您可以添加使用任意端点的自定义服务商。
+Model Proxy 支持任何具有 HTTP API 的 AI 服务商。应用不预置任何服务商，也不内置任何 API 密钥：每个服务商都由您自己填写端点地址和自己的密钥后添加。
 
 ### The proxy server won't start. What should I do? | 代理服务器无法启动怎么办？
 
@@ -82,8 +82,8 @@ For support inquiries, please reach out to:
 
 ## App Information | 应用信息
 
-- **Version**: 1.0
-- **System Requirements**: macOS 15.0 (Sequoia) or later
+- **Version**: 2.5
+- **System Requirements**: macOS 15.6 (Sequoia) or later
 - **Developer**: Norvyn Zhang
 
 Copyright © 2026 Norvyn Zhang. All rights reserved.

@@ -33,9 +33,9 @@ Model Proxy 完全在您的本地设备上运行。具体而言：
 
 ## Data Sharing | 数据共享
 
-Model Proxy does not transmit any data to us or to any third party. The app functions as a transparent pass-through proxy; API requests are sent directly from your device to the AI service providers you have configured (e.g., Anthropic, OpenAI, Alibaba Cloud).
+Model Proxy does not transmit any data to us or to any third party. The app functions as a transparent pass-through proxy; API requests are sent directly from your device to whichever AI service providers you have configured yourself.
 
-Model Proxy 不会向我们或任何第三方传输数据。该应用作为透明直通代理运行；API 请求直接从您的设备发送到您配置的 AI 服务商（如 Anthropic、OpenAI、阿里云）。
+Model Proxy 不会向我们或任何第三方传输数据。该应用作为透明直通代理运行；API 请求直接从您的设备发送到您自己配置的 AI 服务商。
 
 ## Analytics and Tracking | 分析与追踪
 

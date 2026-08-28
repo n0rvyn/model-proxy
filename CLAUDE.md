@@ -2,6 +2,11 @@
 
 macOS menu bar app - transparent local API proxy for multi-vendor model routing.
 
+> **新会话第一件事：读 `private/asc/HANDOFF-2026-08-28-0844.md`**
+> （App Store 2.5 因 Guideline 5 / 中国区被拒，元数据已修但**尚未重新提交**；挂起等审核结果。
+> 该文件在 gitignored 的 `private/` 下 —— 本机有，clone 出来的没有。历史交接见
+> `private/asc/HANDOFF-*.md`。）
+
 ## Document Truth Source
 
 All project documents use `docs/00-AI-CONTEXT.md` as the single source of truth. This file only provides navigation.
