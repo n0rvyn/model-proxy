@@ -15,9 +15,24 @@ which serves the apex). The three pages went live 2026-08-28 as wordbase compani
 `modelproxy-privacy` / `-terms` / `-support`, matching the existing `<app>-<type>` convention
 used by five other apps.
 
-⚠️ **ASC still points at the Notion URLs.** Version 2.5 is in review and its metadata is
-locked, so the switch happens on the next submission: change Privacy Policy URL (App Info) and
-Support URL (Version) to the norvyn.com links above, then retire the Notion pages.
+⚠️ **ASC still points at the Notion URLs.** Version 2.5 shipped on 2026-08-29 with the Notion
+links, and a live version's metadata cannot be edited, so the switch happens on the next
+submission. Do all three at once — `marketingUrl` is the one that gets forgotten:
+
+| ASC field | Where it lives | New value |
+|---|---|---|
+| Privacy Policy URL | App Info (app-level) | https://norvyn.com/modelproxy-privacy |
+| Support URL | Version | https://norvyn.com/modelproxy-support |
+| Marketing URL | Version | ⛔ **no successor yet** — see below |
+
+⛔ **Retiring Notion is blocked on the Market page.** `marketingUrl` currently points at a Notion
+page (Market) that has no source file in this folder and no norvyn.com counterpart — the table at
+the top of this README covers privacy / support / terms only. Decide at the next submission:
+author a `modelproxy-market` companion page on norvyn.com, or clear `marketingUrl` (it is an
+optional field). Until one of those happens, the Notion Market page must stay published.
+
+Also due at that submission: re-run the keyword ranking audit with
+`private/asc/scripts/masaso.py`.
 
 **The Notion pages were cleaned in place on 2026-08-28**, so the URLs currently under review no
 longer name OpenAI. Seven blocks were patched across three pages, verified by read-back
@@ -76,4 +91,17 @@ mainland permits (DeepSeek, 智谱/GLM, Kimi, MiniMax) are likewise unaffected.
 Dropping brand keywords defensively has a measured price: `claude code` ranks the app 38th in CN
 and 110th in US; `模型代理` and `api 代理` are both #1. Remove what Apple names, nothing else.
 
-Detail, evidence, and the resubmit checklist: `private/asc/2026-08-27-guideline-5-china-rejection.md`.
+### Verified 2026-08-29 — this worked
+
+2.5 was approved and released (2026-08-29T01:13:31Z) with the China mainland storefront still
+selected. The resubmission removed `openai` from the two keyword fields **and changed nothing
+else**: every retained brand above stayed, and all 12 screenshots were re-submitted
+byte-identical to 2.4 (`sourceFileChecksum` compared across both versions) — including the
+`04-vendors.png` whose caption reads the literal word "OpenAI".
+
+So the enforced scope is narrower than the field list above: the four text fields were scrubbed,
+the artwork was not, and the submission passed a Guideline 5 human re-review. Keep the constraint
+as written for anything newly authored — but a defensive re-render of existing approved artwork
+buys nothing that was actually asked for.
+
+Detail, evidence, and the outcome: `private/asc/2026-08-27-guideline-5-china-rejection.md` §7.

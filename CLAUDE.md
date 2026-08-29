@@ -2,10 +2,11 @@
 
 macOS menu bar app - transparent local API proxy for multi-vendor model routing.
 
-> **新会话第一件事：读 `private/asc/HANDOFF-2026-08-28-0844.md`**
-> （App Store 2.5 因 Guideline 5 / 中国区被拒，元数据已修但**尚未重新提交**；挂起等审核结果。
-> 该文件在 gitignored 的 `private/` 下 —— 本机有，clone 出来的没有。历史交接见
-> `private/asc/HANDOFF-*.md`。）
+> **App Store 2.5 已过审并发布**（2026-08-29T01:13:31Z，中国区仍在架）。Guideline 5 / 中国区
+> 那次被拒的完整记录与结论在 `private/asc/2026-08-27-guideline-5-china-rejection.md`（§7 是结果）；
+> 常驻合规约束在 `docs/10-app-store-connect/README.md`。⛔ 下次发布前必做两件事，清单在同一份
+> README：三个 ASC URL 切 norvyn.com、跑 `private/asc/scripts/masaso.py` 复检关键词。
+> （`private/` 是 gitignored 的 —— 本机有，clone 出来的没有。历史交接见 `private/asc/HANDOFF-*.md`。）
 
 ## Document Truth Source
 
@@ -24,6 +25,8 @@ All project documents use `docs/00-AI-CONTEXT.md` as the single source of truth.
 | Dev guide / plans | `docs/06-plans/` |
 | Change history | `docs/07-changelog/` |
 | Lessons learned | `docs/09-lessons-learned/` |
+| App Store published pages + compliance | `docs/10-app-store-connect/` |
+| Crystallized decisions | `docs/11-crystals/` |
 
 ## Document After Completing Features
 
