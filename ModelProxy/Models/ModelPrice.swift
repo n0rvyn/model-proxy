@@ -16,9 +16,15 @@ struct ModelPrice: Codable, Sendable, Equatable {
 // MARK: - Built-in Defaults
 
 extension ModelPrice {
-    /// Built-in pricing for mainstream models (as of March 2026).
+    /// Built-in pricing for mainstream models (as of September 2026).
     /// Keyed by model ID prefix for substring matching.
     static let builtInDefaults: [(prefix: String, price: ModelPrice)] = [
+        // Anthropic Claude 5 family (Claude API first-party rates, September 2026)
+        ("claude-fable-5", ModelPrice(inputPerMillion: 10, outputPerMillion: 50)),
+        ("claude-opus-5-5", ModelPrice(inputPerMillion: 4, outputPerMillion: 20)),
+        ("claude-opus-5", ModelPrice(inputPerMillion: 5, outputPerMillion: 25)),
+        ("claude-sonnet-5", ModelPrice(inputPerMillion: 2, outputPerMillion: 10)),
+
         // Anthropic (verified from platform.claude.com/docs March 2026)
         ("claude-opus-4-6", ModelPrice(inputPerMillion: 5, outputPerMillion: 25)),
         ("claude-opus-4-5", ModelPrice(inputPerMillion: 5, outputPerMillion: 25)),

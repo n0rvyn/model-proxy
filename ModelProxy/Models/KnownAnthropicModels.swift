@@ -4,13 +4,19 @@ import Foundation
 /// Users can also type custom model IDs not in this list.
 enum KnownAnthropicModels {
     static let current: [String] = [
-        "claude-opus-4-7",
-        "claude-sonnet-4-6",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5-1",
         "claude-haiku-4-5",
         "claude-haiku-4-5-20251001",
     ]
 
     static let legacy: [String] = [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
         "claude-opus-4-6",
         "claude-sonnet-4-5",
         "claude-opus-4-1-20250805",
