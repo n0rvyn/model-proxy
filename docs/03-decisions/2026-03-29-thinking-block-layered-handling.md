@@ -145,3 +145,22 @@ The evidence shows DeepSeek needs the request-side branch replay behavior from t
 - Legacy vendors and newly created vendors default this capability to `false`; users explicitly enable it for DeepSeek and other vendors that document support.
 
 The branch reuse scope also changed. Persistent replay scope is no longer derived from the TCP channel when the client body has no explicit session field. TCP channel identity is kept only as coordination scope for in-flight request blocking. This keeps Claude Code connection changes from losing stored vendor-local thinking history while preserving coordination isolation for simultaneous requests.
+
+## Addendum: Response Thinking Is Relayed; Replay Under Review (2026-09-25)
+
+The "Response → client: strip ALL thinking" row above no longer describes the code. Since commit
+`8d27741` (2026-05-04) both the SSE and the JSON response paths relay vendor `thinking` blocks to the
+client unchanged; portable stripping applies only to branch hashing. Claude Code therefore stores
+vendor thinking and sends it back on its own.
+
+Protection for Anthropic now comes from Claude Code (verified in the 2.1.282 binary and CHANGELOG):
+it strips stale signatures on a model switch (2.1.152), and on a 400 matching `signature in thinking
+block`, `thinking.signature … field required` or `invalid signature` it removes earlier thinking and
+retries, keeping it out of later requests (2.1.259). Upstream error bodies must stay unmodified for
+that match to work; ModelProxy forwards them as-is.
+
+Branch replay therefore only adds value when it restores thinking the client no longer sends (for
+example after Claude Code stripped it following a switch to Claude and back). ModelProxy now logs
+`BranchReplay restored thinking blocks=N` (counts only) whenever that happens. If the line does not
+appear in real DeepSeek/MiniMax use, the lineage store, broker and coordinator can be retired in a
+separate change that supersedes this ADR.

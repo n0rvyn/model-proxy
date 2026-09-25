@@ -1,7 +1,36 @@
 # Claude Code Feature Coverage Audit (CC ≤ 2.1.282)
 
 **Date:** 2026-09-25
-**Status:** Research. No code changes yet; each item below needs a decision.
+**Status:** Implemented on branch `claude/cc-feature-coverage-audit-tptexr` (see "Resolution" below). Behavior is documented in `docs/05-features/claude-code-compatibility.md`.
+
+## Resolution and corrections (second pass, 2026-09-25)
+
+The second pass checked the claims against the Claude Code 2.1.282 binary itself, not only the docs. It also ran the unit tests in a Linux SwiftPM harness (Swift 6.2, non-UI sources).
+
+**Corrections to the first pass**
+
+- **§6 `count_tokens`:** CC returns `null` (a local estimate) for any failure **except 501**, which triggers a real one-token "gateway sample" generation. The local reply is therefore 404, never 501.
+- **§7 thinking:**
+  - Since `8d27741` (2026-05-04), vendor thinking is **already relayed** to CC on both response paths, so the proposed "relay vendor thinking" toggle would have been a no-op.
+  - CC's signature-rejection retry also matches `thinking.signature … field required`, which covers unsigned blocks.
+  - What remains open is whether branch replay still restores anything. That is now measured by a log line; see the ADR addendum.
+- **§8 session scope:** only the *coordination* scope moved to the CC headers. Session-scoping persistent replay would stop `/branch` forks from reusing vendor transcripts.
+- **N5 timeout:** AsyncHTTPClient cancels the deadline once the response head arrives, so streams were never cut. Only non-streaming passthrough responses slower than 120 s failed.
+- **New bug:** `sendError` awaited unflushed writes (NIO only completes those on flush), so proxy error responses could stall. Fixed.
+- **Existing failures:** three unit tests were failing before any change. They were real `ToolCallInputGuard` bugs: SSE tool calls were lost in non-portable mode, and the trimmed name was never written back. Fixed.
+
+**Commits**
+
+| Item | Commit |
+|---|---|
+| N2 Claude 5 presets + prices | `feat(models): add Claude 5 family presets and prices` |
+| N3 HEAD probe + error-write stall | `fix(proxy): answer HEAD probes locally…` |
+| §6 local 404 | `fix(proxy): answer unsupported count_tokens with a local 404` |
+| §5 guard policy | `fix(guard): repair tool_use shape only…` |
+| §8 + N4 headers | `feat(proxy): use Claude Code session headers…` |
+| N1 opt-in strip | `feat(vendor): opt-in strip of Claude-only request fields…` |
+| N5 passthrough timeout | `fix(proxy): give passthrough requests Claude Code's 600s response timeout` |
+| §7 measurement | `feat(proxy): log when branch replay restores thinking…` |
 **Question:** What has Claude Code (CC) changed since ModelProxy's workarounds were written? Which ModelProxy transforms can now be retired, and which new CC behaviours are not covered yet?
 
 ## Sources

@@ -268,6 +268,21 @@ enum ProxyForwarder {
             break
         }
 
+        if let context = preparedRequest.context, context.reusedBranchHistory {
+            // Claude Code already receives and resends vendor thinking, so branch replay only adds
+            // value when it restores thinking the client no longer sends. Logged (counts only) to
+            // decide whether the replay machinery can be retired.
+            let restored = Self.restoredThinkingBlockCount(
+                originalBody: originalBodyData,
+                preparedBody: preparedRequest.bodyData
+            )
+            if restored > 0 {
+                AppLog.proxy.info(
+                    "[Proxy] [\(requestID)] BranchReplay restored thinking blocks=\(restored) vendor=\(target.vendorName) branch=\(context.branchKey)"
+                )
+            }
+        }
+
         if target.signingDomain.supportsAnthropicSignedReplay {
             let sanitized = sanitizeAnthropicBodyIfNeeded(preparedRequest.bodyData)
             preparedRequest = PreparedRequest(
@@ -1027,6 +1042,15 @@ enum ProxyForwarder {
         let otherBlockCount: Int
         let topLevelThinkingType: String?
         let topLevelThinkingBudget: Int?
+    }
+
+    /// Thinking blocks present in the prepared (projected) body beyond those the client sent.
+    static func restoredThinkingBlockCount(originalBody: Data, preparedBody: Data) -> Int {
+        guard let original = summarizeRequestBody(originalBody),
+              let prepared = summarizeRequestBody(preparedBody) else {
+            return 0
+        }
+        return max(0, prepared.thinkingBlockCount - original.thinkingBlockCount)
     }
 
     static func summarizeRequestBody(_ body: Data) -> RequestStructureSummary? {

@@ -169,6 +169,23 @@ struct ProxyForwarderTests {
         #expect(ProxyForwarder.upstreamHeaders(from: request, target: stripping)["anthropic-version"] == ["2023-06-01"])
     }
 
+    @Test func restoredThinkingBlockCountMeasuresOnlyBlocksTheClientDidNotSend() throws {
+        func body(thinkingBlocks: Int) throws -> Data {
+            let thinking = Array(repeating: ["type": "thinking", "thinking": "t"], count: thinkingBlocks)
+            return try JSONSerialization.data(withJSONObject: [
+                "model": "m",
+                "messages": [
+                    ["role": "user", "content": "q"],
+                    ["role": "assistant", "content": thinking + [["type": "text", "text": "a"]]]
+                ]
+            ])
+        }
+
+        #expect(ProxyForwarder.restoredThinkingBlockCount(originalBody: try body(thinkingBlocks: 0), preparedBody: try body(thinkingBlocks: 2)) == 2)
+        #expect(ProxyForwarder.restoredThinkingBlockCount(originalBody: try body(thinkingBlocks: 2), preparedBody: try body(thinkingBlocks: 2)) == 0)
+        #expect(ProxyForwarder.restoredThinkingBlockCount(originalBody: try body(thinkingBlocks: 2), preparedBody: try body(thinkingBlocks: 0)) == 0)
+    }
+
     @Test func countTokensIsAnsweredLocallyWhenVendorLacksEndpoint() {
         let vendor = countTokensTarget(supportsCountTokens: false, isPassthrough: false)
 
