@@ -744,8 +744,18 @@ enum ProxyForwarder {
 
         let upstreamHeaders = Self.upstreamHeaders(from: head.headers, target: target)
 
-        // Replace model field using prepared body.
         var bodyData = bodyData
+        if !target.isPassthrough, target.stripsClaudeOnlyRequestFields {
+            let stripped = Self.stripClaudeOnlyRequestFields(in: bodyData)
+            bodyData = stripped.bodyData
+            if !stripped.removedFields.isEmpty {
+                AppLog.proxy.debug(
+                    "[Proxy] [\(requestID)] Stripped Claude-only fields for vendor=\(target.vendorName): \(stripped.removedFields.joined(separator: ", "))"
+                )
+            }
+        }
+
+        // Replace model field using prepared body.
         if let targetModel = target.targetModel {
             let replacement = Self.replaceModelField(in: bodyData, with: targetModel)
             bodyData = replacement.data
@@ -783,6 +793,7 @@ enum ProxyForwarder {
             if lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length" || lower == "accept-encoding" { continue }
             // Claude Code session/agent identifiers are meant for the local gateway, not third-party vendors.
             if !target.isPassthrough, lower.hasPrefix("x-claude-code-") { continue }
+            if !target.isPassthrough, target.stripsClaudeOnlyRequestFields, lower == "anthropic-beta" { continue }
             upstreamHeaders.add(name: name, value: value)
         }
         upstreamHeaders.add(name: "Accept-Encoding", value: "gzip, deflate")
@@ -1248,6 +1259,44 @@ enum ProxyForwarder {
         } catch {
             AppLog.proxy.error("[Proxy] [\(requestID)] bridgeCommitFailed lineage=\(branchContext.lineageKey) branch=\(branchContext.branchKey) error=\(String(describing: error))")
         }
+    }
+
+    /// Top-level request fields Claude Code sends for Claude models (observed in Claude Code 2.1.282)
+    /// that Anthropic-compatible vendors may reject. Claude Code does not retry without them.
+    static let claudeOnlyBodyFields = ["context_management", "output_config", "safeguards", "speed", "thread"]
+    /// Tool-definition fields tied to Anthropic betas.
+    static let claudeOnlyToolFields = ["strict", "defer_loading", "eager_input_streaming"]
+
+    struct ClaudeOnlyFieldStripResult {
+        let bodyData: Data
+        let removedFields: [String]
+    }
+
+    /// Opt-in per vendor. The body is re-serialized only when a field was actually removed.
+    static func stripClaudeOnlyRequestFields(in bodyData: Data) -> ClaudeOnlyFieldStripResult {
+        guard var json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            return ClaudeOnlyFieldStripResult(bodyData: bodyData, removedFields: [])
+        }
+        var removed: [String] = []
+        for field in claudeOnlyBodyFields where json.removeValue(forKey: field) != nil {
+            removed.append(field)
+        }
+        if let tools = json["tools"] as? [[String: Any]] {
+            var removedToolFields: Set<String> = []
+            json["tools"] = tools.map { tool in
+                var tool = tool
+                for field in claudeOnlyToolFields where tool.removeValue(forKey: field) != nil {
+                    removedToolFields.insert(field)
+                }
+                return tool
+            }
+            removed += removedToolFields.sorted().map { "tools[].\($0)" }
+        }
+        guard !removed.isEmpty,
+              let encoded = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) else {
+            return ClaudeOnlyFieldStripResult(bodyData: bodyData, removedFields: [])
+        }
+        return ClaudeOnlyFieldStripResult(bodyData: encoded, removedFields: removed)
     }
 
     /// Remove tool definitions that mapped vendors cannot handle.

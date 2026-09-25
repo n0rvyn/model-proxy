@@ -106,6 +106,69 @@ struct ProxyForwarderTests {
         #expect(passthroughHeaders["x-api-key"] == ["client-key"])
     }
 
+    @Test func stripClaudeOnlyRequestFieldsRemovesBodyAndToolFieldsOnly() throws {
+        let body = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-opus-5-5",
+            "max_tokens": 1024,
+            "thinking": ["type": "adaptive"],
+            "context_management": ["edits": [["type": "clear_tool_uses_20250919"]]],
+            "output_config": ["effort": "xhigh"],
+            "messages": [["role": "user", "content": "hi"]],
+            "tools": [[
+                "name": "Bash",
+                "input_schema": ["type": "object"],
+                "strict": true,
+                "eager_input_streaming": true,
+                "cache_control": ["type": "ephemeral"]
+            ]]
+        ])
+
+        let result = ProxyForwarder.stripClaudeOnlyRequestFields(in: body)
+
+        #expect(result.removedFields == ["context_management", "output_config", "tools[].eager_input_streaming", "tools[].strict"])
+        let json = try #require(try JSONSerialization.jsonObject(with: result.bodyData) as? [String: Any])
+        #expect(json["context_management"] == nil)
+        #expect(json["output_config"] == nil)
+        #expect(json["thinking"] != nil)
+        #expect(json["max_tokens"] as? Int == 1024)
+        let tool = try #require((json["tools"] as? [[String: Any]])?.first)
+        #expect(tool["strict"] == nil)
+        #expect(tool["eager_input_streaming"] == nil)
+        #expect(tool["cache_control"] != nil)
+        #expect(tool["input_schema"] != nil)
+    }
+
+    @Test func stripClaudeOnlyRequestFieldsLeavesBytesUntouchedWhenNothingToRemove() throws {
+        let body = Data(#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+
+        let result = ProxyForwarder.stripClaudeOnlyRequestFields(in: body)
+
+        #expect(result.bodyData == body)
+        #expect(result.removedFields.isEmpty)
+    }
+
+    @Test func anthropicBetaHeaderIsDroppedOnlyForStrippingVendors() {
+        let request: HTTPHeaders = ["anthropic-beta": "context-management-2025-06-27", "anthropic-version": "2023-06-01"]
+        let base = countTokensTarget(supportsCountTokens: true, isPassthrough: false)
+        let stripping = RoutingSnapshot.RouteTarget(
+            baseURL: base.baseURL,
+            apiKey: base.apiKey,
+            vendorName: base.vendorName,
+            vendorID: base.vendorID,
+            targetModel: base.targetModel,
+            isPassthrough: false,
+            connectTimeoutSeconds: 10,
+            readTimeoutSeconds: 120,
+            signingDomain: .compatibleThirdParty,
+            replayPolicy: .portableOnly,
+            stripsClaudeOnlyRequestFields: true
+        )
+
+        #expect(ProxyForwarder.upstreamHeaders(from: request, target: base)["anthropic-beta"] == ["context-management-2025-06-27"])
+        #expect(!ProxyForwarder.upstreamHeaders(from: request, target: stripping).contains(name: "anthropic-beta"))
+        #expect(ProxyForwarder.upstreamHeaders(from: request, target: stripping)["anthropic-version"] == ["2023-06-01"])
+    }
+
     @Test func countTokensIsAnsweredLocallyWhenVendorLacksEndpoint() {
         let vendor = countTokensTarget(supportsCountTokens: false, isPassthrough: false)
 
