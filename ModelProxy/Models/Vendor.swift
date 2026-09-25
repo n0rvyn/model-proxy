@@ -4,6 +4,7 @@ enum VendorDefaults {
     static let supportsThinkingBlocks = false
     static let supportsAnthropicCountTokens = true
     static let repairsAnthropicToolCalls = false
+    static let stripsClaudeOnlyRequestFields = false
 
     static func isDeepSeekBaseURL(_ baseURL: String) -> Bool {
         if let host = URL(string: baseURL)?.host?.lowercased() {
@@ -46,6 +47,8 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
     var supportsAnthropicCountTokens: Bool
     /// Whether ModelProxy should repair returned Anthropic `tool_use.input` blocks for this vendor.
     var repairsAnthropicToolCalls: Bool
+    /// Whether ModelProxy removes Claude-only request fields and `anthropic-beta` before forwarding.
+    var stripsClaudeOnlyRequestFields: Bool
     /// Which signing domain this vendor belongs to for transcript replay compatibility.
     var signingDomain: SigningDomain
     /// Whether requests to this vendor should preserve raw replay-sensitive transcript blocks.
@@ -63,6 +66,7 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks,
         supportsAnthropicCountTokens: Bool? = nil,
         repairsAnthropicToolCalls: Bool? = nil,
+        stripsClaudeOnlyRequestFields: Bool = VendorDefaults.stripsClaudeOnlyRequestFields,
         signingDomain: SigningDomain? = nil,
         replayPolicy: TranscriptReplayPolicy? = nil
     ) {
@@ -80,6 +84,7 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
             ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
         self.repairsAnthropicToolCalls = repairsAnthropicToolCalls
             ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
+        self.stripsClaudeOnlyRequestFields = stripsClaudeOnlyRequestFields
         self.signingDomain = resolvedSigningDomain
         self.replayPolicy = replayPolicy ?? TranscriptReplayPolicy.defaultPolicy(for: resolvedSigningDomain)
     }
@@ -94,6 +99,7 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         case supportsThinkingBlocks
         case supportsAnthropicCountTokens
         case repairsAnthropicToolCalls
+        case stripsClaudeOnlyRequestFields
         case signingDomain
         case replayPolicy
     }
@@ -114,6 +120,8 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
             ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
         repairsAnthropicToolCalls = (try? c.decodeIfPresent(Bool.self, forKey: .repairsAnthropicToolCalls))
             ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
+        stripsClaudeOnlyRequestFields = (try? c.decodeIfPresent(Bool.self, forKey: .stripsClaudeOnlyRequestFields))
+            ?? VendorDefaults.stripsClaudeOnlyRequestFields
         let resolvedSigningDomain = (try? c.decode(SigningDomain.self, forKey: .signingDomain))
             ?? SigningDomain.infer(fromBaseURL: baseURL)
         signingDomain = resolvedSigningDomain

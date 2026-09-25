@@ -342,6 +342,17 @@ struct ModelProxyTests {
         #expect(mappings[1].isEnabled == true)
     }
 
+    @Test func vendorStripsClaudeOnlyFieldsDefaultsOffAndRoundTrips() throws {
+        let legacyJSON = Data(#"{"id":"00000000-0000-0000-0000-0000000000E1","name":"Legacy","baseURL":"https://example.com","apiKey":"k"}"#.utf8)
+        let legacy = try JSONDecoder().decode(Vendor.self, from: legacyJSON)
+        #expect(legacy.stripsClaudeOnlyRequestFields == false)
+
+        var vendor = Vendor(name: "V", baseURL: "https://example.com", apiKey: "k")
+        vendor.stripsClaudeOnlyRequestFields = true
+        let decoded = try JSONDecoder().decode(Vendor.self, from: JSONEncoder().encode(vendor))
+        #expect(decoded.stripsClaudeOnlyRequestFields == true)
+    }
+
     @Test func trafficEntryLabelsNonMainRequestClassesAndDimsAuxiliaryOnes() {
         let entry = TrafficEntry(model: "claude-opus-5-5", routeType: .passthrough, requestKind: .generation, httpStatus: 200)
 
@@ -406,6 +417,31 @@ struct ModelProxyTests {
         #expect(config.clients[1].clientName == "Codex")
         #expect(config.clients[1].port == 8081)
         #expect(config.modelMappings.isEmpty)
+    }
+
+    @Test func routingSnapshotCarriesVendorStripFlagToPrimaryAndFallbackTargets() {
+        let vendor = Vendor(
+            name: "MiniMax",
+            baseURL: "https://api.minimaxi.com/anthropic",
+            apiKey: "k",
+            stripsClaudeOnlyRequestFields: true
+        )
+        let mapping = ModelMapping(sourceModel: "claude-sonnet-5", targetModel: "MiniMax-M3", targetVendorID: vendor.id)
+        let client = ClientConfig(
+            clientName: "Claude Code",
+            port: 8080,
+            defaultUpstream: "https://api.anthropic.com",
+            unmappedPolicy: .routeAll,
+            fallbackVendorID: vendor.id
+        )
+        let snapshot = RoutingSnapshot(from: AppConfig(vendors: [vendor], clients: [client], modelMappings: [mapping]), for: client)
+
+        for model in ["claude-sonnet-5", "claude-unmapped"] {
+            guard case .routed(let target) = snapshot.resolve(model: model, originalAPIKey: "o").result else {
+                Issue.record("Expected .routed for \(model)"); continue
+            }
+            #expect(target.stripsClaudeOnlyRequestFields)
+        }
     }
 
     // MARK: - RoutingSnapshot: mapped model

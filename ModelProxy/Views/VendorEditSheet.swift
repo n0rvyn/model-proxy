@@ -22,6 +22,7 @@ struct VendorEditSheet: View {
     @State private var supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks
     @State private var supportsAnthropicCountTokens: Bool = VendorDefaults.supportsAnthropicCountTokens
     @State private var repairsAnthropicToolCalls: Bool = VendorDefaults.repairsAnthropicToolCalls
+    @State private var stripsClaudeOnlyRequestFields: Bool = VendorDefaults.stripsClaudeOnlyRequestFields
     @State private var capabilityDefaultsManuallyEdited: Bool = false
     @State private var signingDomain: SigningDomain = .compatibleThirdParty
     @State private var replayPolicy: TranscriptReplayPolicy = .portableOnly
@@ -77,6 +78,7 @@ struct VendorEditSheet: View {
                     Toggle("Supports Thinking Blocks", isOn: $supportsThinkingBlocks)
                     Toggle("Supports Count Tokens", isOn: supportsAnthropicCountTokensBinding)
                     Toggle("Repair Tool Call Inputs", isOn: repairsAnthropicToolCallsBinding)
+                    Toggle("Strip Claude-Only Request Fields", isOn: $stripsClaudeOnlyRequestFields)
                 }
 
                 Section {
@@ -194,6 +196,7 @@ struct VendorEditSheet: View {
                 supportsThinkingBlocks = vendor.supportsThinkingBlocks
                 supportsAnthropicCountTokens = vendor.supportsAnthropicCountTokens
                 repairsAnthropicToolCalls = vendor.repairsAnthropicToolCalls
+                stripsClaudeOnlyRequestFields = vendor.stripsClaudeOnlyRequestFields
                 signingDomain = vendor.signingDomain
                 replayPolicy = vendor.replayPolicy
             }
@@ -214,6 +217,7 @@ struct VendorEditSheet: View {
             configStore.config.vendors[idx].supportsThinkingBlocks = supportsThinkingBlocks
             configStore.config.vendors[idx].supportsAnthropicCountTokens = supportsAnthropicCountTokens
             configStore.config.vendors[idx].repairsAnthropicToolCalls = repairsAnthropicToolCalls
+            configStore.config.vendors[idx].stripsClaudeOnlyRequestFields = stripsClaudeOnlyRequestFields
             configStore.config.vendors[idx].signingDomain = signingDomain
             configStore.config.vendors[idx].replayPolicy = replayPolicy
         } else {
@@ -228,6 +232,7 @@ struct VendorEditSheet: View {
                 supportsThinkingBlocks: supportsThinkingBlocks,
                 supportsAnthropicCountTokens: supportsAnthropicCountTokens,
                 repairsAnthropicToolCalls: repairsAnthropicToolCalls,
+                stripsClaudeOnlyRequestFields: stripsClaudeOnlyRequestFields,
                 signingDomain: signingDomain,
                 replayPolicy: replayPolicy
             )

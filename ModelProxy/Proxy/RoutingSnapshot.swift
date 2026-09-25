@@ -32,6 +32,8 @@ struct RoutingSnapshot: Sendable {
         let supportsAnthropicCountTokens: Bool
         /// Whether ModelProxy should repair returned Anthropic `tool_use.input` blocks.
         let repairsAnthropicToolCalls: Bool
+        /// Whether Claude-only request fields and `anthropic-beta` are removed before forwarding.
+        let stripsClaudeOnlyRequestFields: Bool
 
         init(
             baseURL: String,
@@ -46,7 +48,8 @@ struct RoutingSnapshot: Sendable {
             replayPolicy: TranscriptReplayPolicy,
             supportsThinkingBlocks: Bool = VendorDefaults.supportsThinkingBlocks,
             supportsAnthropicCountTokens: Bool = VendorDefaults.supportsAnthropicCountTokens,
-            repairsAnthropicToolCalls: Bool = VendorDefaults.repairsAnthropicToolCalls
+            repairsAnthropicToolCalls: Bool = VendorDefaults.repairsAnthropicToolCalls,
+            stripsClaudeOnlyRequestFields: Bool = VendorDefaults.stripsClaudeOnlyRequestFields
         ) {
             self.baseURL = baseURL
             self.apiKey = apiKey
@@ -61,6 +64,7 @@ struct RoutingSnapshot: Sendable {
             self.supportsThinkingBlocks = supportsThinkingBlocks
             self.supportsAnthropicCountTokens = supportsAnthropicCountTokens
             self.repairsAnthropicToolCalls = repairsAnthropicToolCalls
+            self.stripsClaudeOnlyRequestFields = stripsClaudeOnlyRequestFields
         }
     }
 
@@ -119,7 +123,8 @@ struct RoutingSnapshot: Sendable {
                 replayPolicy: vendor.replayPolicy,
                 supportsThinkingBlocks: vendor.supportsThinkingBlocks,
                 supportsAnthropicCountTokens: vendor.supportsAnthropicCountTokens,
-                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls
+                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls,
+                stripsClaudeOnlyRequestFields: vendor.stripsClaudeOnlyRequestFields
             )
             var targets = [primary]
 
@@ -140,7 +145,8 @@ struct RoutingSnapshot: Sendable {
                     replayPolicy: backupVendor.replayPolicy,
                     supportsThinkingBlocks: backupVendor.supportsThinkingBlocks,
                     supportsAnthropicCountTokens: backupVendor.supportsAnthropicCountTokens,
-                    repairsAnthropicToolCalls: backupVendor.repairsAnthropicToolCalls
+                    repairsAnthropicToolCalls: backupVendor.repairsAnthropicToolCalls,
+                    stripsClaudeOnlyRequestFields: backupVendor.stripsClaudeOnlyRequestFields
                 )
                 targets.append(backup)
             }
@@ -176,7 +182,8 @@ struct RoutingSnapshot: Sendable {
                 replayPolicy: vendor.replayPolicy,
                 supportsThinkingBlocks: vendor.supportsThinkingBlocks,
                 supportsAnthropicCountTokens: vendor.supportsAnthropicCountTokens,
-                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls
+                repairsAnthropicToolCalls: vendor.repairsAnthropicToolCalls,
+                stripsClaudeOnlyRequestFields: vendor.stripsClaudeOnlyRequestFields
             )
         } else {
             self.fallbackTarget = nil
