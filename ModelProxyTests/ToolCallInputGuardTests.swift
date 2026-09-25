@@ -57,7 +57,7 @@ struct ToolCallInputGuardTests {
         #expect(input.isEmpty)
     }
 
-    @Test func removesAdditionalPropertiesWhenSchemaDisallowsThem() throws {
+    @Test func leavesAdditionalPropertiesForClaudeCodeToValidate() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(
             required: ["path"],
             properties: ["path": ["type": "string"]],
@@ -70,17 +70,13 @@ struct ToolCallInputGuardTests {
             "input": ["path": "/tmp/a", "extra": true]
         ])
 
-        guard case .repaired(let reason) = result.action else {
-            Issue.record("Expected repaired action"); return
-        }
-        #expect(reason == "additional_properties_removed")
+        #expect(result.action == .unchanged)
         let block = try #require(result.block)
         let input = try #require(block["input"] as? [String: Any])
-        #expect(input["path"] as? String == "/tmp/a")
-        #expect(input["extra"] == nil)
+        #expect(input["extra"] as? Bool == true)
     }
 
-    @Test func dropsUnknownTool() {
+    @Test func passesUnknownToolThroughForClaudeCodeToReport() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
         let result = guarder.repairToolUseBlock([
             "type": "tool_use",
@@ -89,11 +85,12 @@ struct ToolCallInputGuardTests {
             "input": [:]
         ])
 
-        #expect(result.block == nil)
-        #expect(result.action == .dropped("unknown_tool"))
+        #expect(result.action == .unchanged)
+        let block = try #require(result.block)
+        #expect(block["name"] as? String == "Unknown")
     }
 
-    @Test func dropsMissingRequiredInput() {
+    @Test func insertsEmptyInputEvenWhenSchemaHasRequiredFields() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: ["cmd"], properties: [
             "cmd": ["type": "string"]
         ]))
@@ -103,11 +100,13 @@ struct ToolCallInputGuardTests {
             "name": "Bash"
         ])
 
-        #expect(result.block == nil)
-        #expect(result.action == .dropped("missing_required_input"))
+        #expect(result.action == .repaired("empty_input_inserted"))
+        let block = try #require(result.block)
+        let input = try #require(block["input"] as? [String: Any])
+        #expect(input.isEmpty)
     }
 
-    @Test func dropsScalarTypeMismatch() {
+    @Test func passesScalarTypeMismatchThroughForClaudeCodeToValidate() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: ["cmd"], properties: [
             "cmd": ["type": "string"]
         ]))
@@ -118,11 +117,13 @@ struct ToolCallInputGuardTests {
             "input": ["cmd": 42]
         ])
 
-        #expect(result.block == nil)
-        #expect(result.action == .dropped("field_type_mismatch"))
+        #expect(result.action == .unchanged)
+        let block = try #require(result.block)
+        let input = try #require(block["input"] as? [String: Any])
+        #expect(input["cmd"] as? Int == 42)
     }
 
-    @Test func dropsUnparseableInputString() {
+    @Test func replacesUnparseableInputStringWithEmptyObject() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: ["cmd"], properties: [
             "cmd": ["type": "string"]
         ]))
@@ -133,8 +134,52 @@ struct ToolCallInputGuardTests {
             "input": "{not-json"
         ])
 
+        #expect(result.action == .repaired("input_not_object_replaced"))
+        let block = try #require(result.block)
+        let input = try #require(block["input"] as? [String: Any])
+        #expect(input.isEmpty)
+    }
+
+    @Test func replacesNonObjectInputWithEmptyObject() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "Bash",
+            "input": ["not", "an", "object"]
+        ])
+
+        #expect(result.action == .repaired("input_not_object_replaced"))
+        let block = try #require(result.block)
+        #expect((block["input"] as? [String: Any])?.isEmpty == true)
+    }
+
+    @Test func insertsIDWhenToolUseHasNone() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "name": "Bash",
+            "input": [:]
+        ])
+
+        #expect(result.action == .repaired("missing_id_inserted"))
+        let block = try #require(result.block)
+        let id = try #require(block["id"] as? String)
+        #expect(id.hasPrefix("toolu_"))
+        #expect(ToolUseIDNormalizer.isValidToolID(id))
+    }
+
+    @Test func dropsToolUseWithoutName() {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let result = guarder.repairToolUseBlock([
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "  ",
+            "input": [:]
+        ])
+
         #expect(result.block == nil)
-        #expect(result.action == .dropped("input_string_parse_failed"))
+        #expect(result.action == .dropped("missing_tool_name"))
     }
 
     @Test func transformJSONLeavesWholeResponseParseFailureUnchanged() {
@@ -149,7 +194,7 @@ struct ToolCallInputGuardTests {
         #expect(result.droppedCount == 0)
     }
 
-    @Test func transformJSONReplacesDroppedToolUseWithTextBlock() throws {
+    @Test func transformJSONReplacesDroppedToolUseWithTextBlockAndEndsTurn() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: ["cmd"], properties: [
             "cmd": ["type": "string"]
         ]))
@@ -157,11 +202,12 @@ struct ToolCallInputGuardTests {
             "id": "msg_1",
             "type": "message",
             "role": "assistant",
+            "stop_reason": "tool_use",
             "content": [[
                 "type": "tool_use",
                 "id": "toolu_1",
-                "name": "Bash",
-                "input": ["cmd": 42]
+                "name": "",
+                "input": ["cmd": "ls"]
             ]]
         ])
 
@@ -172,7 +218,27 @@ struct ToolCallInputGuardTests {
         let content = try #require(json["content"] as? [[String: Any]])
         #expect(content.count == 1)
         #expect(content[0]["type"] as? String == "text")
-        #expect((content[0]["text"] as? String)?.contains("field_type_mismatch") == true)
+        #expect((content[0]["text"] as? String)?.contains("missing_tool_name") == true)
+        #expect(json["stop_reason"] as? String == "end_turn")
+    }
+
+    @Test func transformJSONKeepsToolUseStopReasonWhenAnotherToolCallSurvives() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let response = try JSONSerialization.data(withJSONObject: [
+            "role": "assistant",
+            "stop_reason": "tool_use",
+            "content": [
+                ["type": "tool_use", "id": "toolu_1", "name": "", "input": [:]],
+                ["type": "tool_use", "id": "toolu_2", "name": "Bash", "input": "{\"cmd\":\"ls\"}"]
+            ]
+        ])
+
+        let result = guarder.transformJSONResponseBody(response)
+
+        #expect(result.droppedCount == 1)
+        #expect(result.repairedCount == 1)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.data) as? [String: Any])
+        #expect(json["stop_reason"] as? String == "tool_use")
     }
 
     @Test func sseGuardRepairsToolUseWhenPortableContextIsAbsent() throws {
@@ -209,7 +275,7 @@ struct ToolCallInputGuardTests {
         #expect(summary.droppedCount == 0)
     }
 
-    @Test func sseGuardDropsInvalidToolUseWhenPortableContextIsAbsent() throws {
+    @Test func sseGuardPassesSchemaMismatchThroughWhenPortableContextIsAbsent() throws {
         let guarder = ToolCallInputGuard(catalog: catalog(required: ["cmd"], properties: [
             "cmd": ["type": "string"]
         ]))
@@ -218,31 +284,50 @@ struct ToolCallInputGuardTests {
             toolCallGuard: guarder
         )
         let stream = [
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{}}}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":42}\"}}\n\n",
-            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":42}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
+        ].joined()
+        let output = try push(stream, through: normalizer)
+        let payloads = try ssePayloads(output)
+
+        let start = try #require(payloads[safe: 0])
+        #expect(start["index"] as? Int == 1)
+        let startBlock = try #require(start["content_block"] as? [String: Any])
+        #expect(startBlock["type"] as? String == "tool_use")
+        let delta = try #require(payloads[safe: 1]?["delta"] as? [String: Any])
+        #expect(delta["partial_json"] as? String == "{\"cmd\":42}")
+        let messageDelta = try #require(payloads[safe: 3]?["delta"] as? [String: Any])
+        #expect(messageDelta["stop_reason"] as? String == "tool_use")
+
+        let summary = normalizer.toolCallGuardSummary()
+        #expect(summary.repairedCount == 0)
+        #expect(summary.droppedCount == 0)
+    }
+
+    @Test func sseGuardDropsNamelessToolUseAndEndsTurn() throws {
+        let guarder = ToolCallInputGuard(catalog: catalog(required: [], properties: [:]))
+        let normalizer = PortableContentNormalizer().makeSSEStreamNormalizer(
+            portableMode: false,
+            toolCallGuard: guarder
+        )
+        let stream = [
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"\",\"input\":{}}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
         ].joined()
         let output = try push(stream, through: normalizer)
         let payloads = try ssePayloads(output)
 
         #expect(!output.contains("\"type\":\"tool_use\""))
-        #expect(output.contains("\"type\":\"text\""))
-        #expect(output.contains("field_type_mismatch"))
-
-        let start = try #require(payloads[safe: 0])
-        let startBlock = try #require(start["content_block"] as? [String: Any])
+        let startBlock = try #require(payloads[safe: 0]?["content_block"] as? [String: Any])
         #expect(startBlock["type"] as? String == "text")
-        #expect(startBlock["text"] as? String == "")
-
-        let delta = try #require(payloads[safe: 1])
-        let deltaBlock = try #require(delta["delta"] as? [String: Any])
-        #expect(deltaBlock["type"] as? String == "text_delta")
-        #expect((deltaBlock["text"] as? String)?.contains("field_type_mismatch") == true)
-
-        let summary = normalizer.toolCallGuardSummary()
-        #expect(summary.repairedCount == 0)
-        #expect(summary.droppedCount == 1)
-        #expect(summary.reasons == ["field_type_mismatch"])
+        let textDelta = try #require(payloads[safe: 1]?["delta"] as? [String: Any])
+        #expect((textDelta["text"] as? String)?.contains("missing_tool_name") == true)
+        let messageDelta = try #require(payloads.last?["delta"] as? [String: Any])
+        #expect(messageDelta["stop_reason"] as? String == "end_turn")
+        #expect(normalizer.toolCallGuardSummary().droppedCount == 1)
     }
 
     @Test func sseGuardCommitsDroppedToolUseAsClientVisibleText() throws {
@@ -254,14 +339,14 @@ struct ToolCallInputGuardTests {
             toolCallGuard: guarder
         )
         let stream = [
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Grep\",\"input\":{}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"\",\"input\":{}}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"pattern\\\":\\\"TODO\\\"}\"}}\n\n",
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
         ].joined()
         let output = try push(stream, through: normalizer)
 
         #expect(output.contains("Tool call removed"))
-        #expect(output.contains("unknown_tool"))
+        #expect(output.contains("missing_tool_name"))
         #expect(!output.contains("\"type\":\"tool_use\""))
 
         let assistantTurn = try #require(try normalizer.finish())
@@ -270,12 +355,12 @@ struct ToolCallInputGuardTests {
 
         #expect(fullBlocks.count == 1)
         #expect(fullBlocks[0]["type"] as? String == "text")
-        #expect((fullBlocks[0]["text"] as? String)?.contains("unknown_tool") == true)
+        #expect((fullBlocks[0]["text"] as? String)?.contains("missing_tool_name") == true)
         #expect(!fullBlocks.contains { $0["type"] as? String == "tool_use" })
 
         #expect(portableBlocks.count == 1)
         #expect(portableBlocks[0]["type"] as? String == "text")
-        #expect((portableBlocks[0]["text"] as? String)?.contains("unknown_tool") == true)
+        #expect((portableBlocks[0]["text"] as? String)?.contains("missing_tool_name") == true)
         #expect(!portableBlocks.contains { $0["type"] as? String == "tool_use" })
     }
 
@@ -387,14 +472,7 @@ struct ToolCallInputGuardTests {
             "input": [:]
         ])
 
-        switch result.action {
-        case .unchanged:
-            break
-        case .repaired:
-            Issue.record("Expected unchanged after trim, got repaired")
-        case .dropped(let reason):
-            Issue.record("Expected match after trim, got dropped: \(reason)")
-        }
+        #expect(result.action == .repaired("name_whitespace_trimmed"))
         let block = try #require(result.block)
         #expect(block["name"] as? String == "Bash")
     }
@@ -416,7 +494,7 @@ struct ToolCallInputGuardTests {
         #expect(block["name"] as? String == "Bash")
     }
 
-    @Test func ambiguousToolNameDropped() throws {
+    @Test func ambiguousToolNamePassesThroughUnchanged() throws {
         // Catalog with two tools that differ only by case
         let catalog = ToolCallInputGuard.ToolCatalog(schemasByName: [
             "grep": objectSchema(),
@@ -430,10 +508,9 @@ struct ToolCallInputGuardTests {
             "input": [:]
         ])
 
-        guard case .dropped(let reason) = result.action else {
-            Issue.record("Expected dropped action"); return
-        }
-        #expect(reason.contains("ambiguous_tool_name"))
+        #expect(result.action == .unchanged)
+        let block = try #require(result.block)
+        #expect(block["name"] as? String == "greP")
     }
 }
 

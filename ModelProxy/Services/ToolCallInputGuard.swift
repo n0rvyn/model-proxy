@@ -99,6 +99,16 @@ struct ToolCallInputGuard {
         }
 
         json["content"] = transformed.blocks
+        let remainingToolUseCount = transformed.blocks.filter {
+            (($0 as? [String: Any])?["type"] as? String)?.lowercased() == "tool_use"
+        }.count
+        if let stopReason = Self.stopReasonAfterGuard(
+            json["stop_reason"] as? String,
+            remainingToolUseCount: remainingToolUseCount,
+            droppedCount: transformed.droppedCount
+        ) {
+            json["stop_reason"] = stopReason
+        }
         let encoded = (try? TranscriptProjector.encodeJSONObject(json)) ?? data
         return JSONTransformResult(
             data: encoded,
@@ -148,92 +158,71 @@ struct ToolCallInputGuard {
         )
     }
 
+    /// Repairs only the *shape* of a returned `tool_use` block so it stays a valid Anthropic block in
+    /// Claude Code's history. Argument *content* (required fields, types, extra keys, unknown tools) is
+    /// left for Claude Code to validate: it answers with an error `tool_result` the model can retry on,
+    /// which is better than removing the call. A block is dropped only when it has no tool name.
     func repairToolUseBlock(_ block: [String: Any]) -> BlockResult {
-        guard let name = block["name"] as? String, !name.isEmpty else {
+        guard let name = block["name"] as? String,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return BlockResult(block: nil, action: .dropped("missing_tool_name"))
         }
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        var resolvedName = trimmedName
+        var repairedBlock = block
         var repairReasons: [String] = []
 
-        let schema: [String: Any]
-        if let exact = catalog.schemasByName[trimmedName] {
-            schema = exact
-        } else {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName != name {
+            repairReasons.append("name_whitespace_trimmed")
+        }
+        var resolvedName = trimmedName
+        if catalog.schemasByName[trimmedName] == nil {
             let lower = trimmedName.lowercased()
             let matches = catalog.schemasByName.keys.filter { $0.lowercased() == lower }
-            if matches.count == 1, let matchName = matches.first, let matchSchema = catalog.schemasByName[matchName] {
-                schema = matchSchema
+            if matches.count == 1, let matchName = matches.first {
                 resolvedName = matchName
                 repairReasons.append("name_case_normalized")
-            } else if matches.count > 1 {
-                return BlockResult(block: nil, action: .dropped("ambiguous_tool_name"))
-            } else {
-                return BlockResult(block: nil, action: .dropped("unknown_tool"))
             }
         }
+        repairedBlock["name"] = resolvedName
 
-        let required = Set((schema["required"] as? [String]) ?? [])
-        let properties = schema["properties"] as? [String: Any] ?? [:]
-        let objectSchema = (schema["type"] as? String)?.lowercased() == "object" || schema["type"] == nil
-
-        guard objectSchema else {
-            return BlockResult(block: block, action: .unchanged)
+        if (block["id"] as? String)?.isEmpty ?? true {
+            repairedBlock["id"] = "toolu_mp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            repairReasons.append("missing_id_inserted")
         }
 
-        var repairedBlock = block
-        repairedBlock["name"] = resolvedName
-        var inputObject: [String: Any]
-
-        if let input = block["input"] {
-            if let dictionary = input as? [String: Any] {
-                inputObject = dictionary
-            } else if let text = input as? String {
-                guard let data = text.data(using: .utf8),
-                      let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    return BlockResult(block: nil, action: .dropped("input_string_parse_failed"))
-                }
-                inputObject = parsed
+        switch block["input"] {
+        case is [String: Any]:
+            break
+        case let text as String:
+            if let data = text.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                repairedBlock["input"] = parsed
                 repairReasons.append("input_string_parsed")
             } else {
-                return BlockResult(block: nil, action: .dropped("input_not_object"))
+                repairedBlock["input"] = [String: Any]()
+                repairReasons.append("input_not_object_replaced")
             }
-        } else {
-            guard required.isEmpty else {
-                return BlockResult(block: nil, action: .dropped("missing_required_input"))
-            }
-            inputObject = [:]
+        case nil:
+            repairedBlock["input"] = [String: Any]()
             repairReasons.append("empty_input_inserted")
+        default:
+            repairedBlock["input"] = [String: Any]()
+            repairReasons.append("input_not_object_replaced")
         }
 
-        if schema["additionalProperties"] as? Bool == false {
-            let allowedKeys = Set(properties.keys)
-            let filtered = inputObject.filter { allowedKeys.contains($0.key) }
-            if filtered.count != inputObject.count {
-                inputObject = filtered
-                repairReasons.append("additional_properties_removed")
-            }
-        }
-
-        for field in required where inputObject[field] == nil {
-            return BlockResult(block: nil, action: .dropped("missing_required_field"))
-        }
-
-        for (field, value) in inputObject {
-            guard let propertySchema = properties[field] as? [String: Any],
-                  let type = propertySchema["type"] as? String else {
-                continue
-            }
-            guard Self.value(value, matchesJSONSchemaType: type) else {
-                return BlockResult(block: nil, action: .dropped("field_type_mismatch"))
-            }
-        }
-
-        repairedBlock["input"] = inputObject
         guard !repairReasons.isEmpty else {
             return BlockResult(block: block, action: .unchanged)
         }
         return BlockResult(block: repairedBlock, action: .repaired(repairReasons.joined(separator: "+")))
+    }
+
+    /// When every tool call in a turn was dropped, a `tool_use` stop reason would leave Claude Code
+    /// waiting on tool calls that no longer exist.
+    static func stopReasonAfterGuard(_ stopReason: String?, remainingToolUseCount: Int, droppedCount: Int) -> String? {
+        guard stopReason == "tool_use", droppedCount > 0, remainingToolUseCount == 0 else {
+            return stopReason
+        }
+        return "end_turn"
     }
 
     static func invalidToolTextBlock(toolName: String?, reason: String) -> [String: Any] {
@@ -245,31 +234,7 @@ struct ToolCallInputGuard {
         }
         return [
             "type": "text",
-            "text": "Tool call removed: invalid parameters for \(name) (\(reason))."
+            "text": "Tool call removed: \(name) could not be relayed (\(reason))."
         ]
-    }
-
-    static func value(_ value: Any, matchesJSONSchemaType type: String) -> Bool {
-        switch type.lowercased() {
-        case "string":
-            return value is String
-        case "integer":
-            guard let number = value as? NSNumber, !isBoolean(number) else { return false }
-            return floor(number.doubleValue) == number.doubleValue
-        case "number":
-            return (value as? NSNumber).map { !isBoolean($0) } ?? false
-        case "boolean":
-            return value is Bool
-        case "array":
-            return value is [Any]
-        case "object":
-            return value is [String: Any]
-        default:
-            return true
-        }
-    }
-
-    private static func isBoolean(_ number: NSNumber) -> Bool {
-        CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 }
