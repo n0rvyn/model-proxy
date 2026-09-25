@@ -42,7 +42,9 @@ private struct ClientRowSection: View {
         default:
             toolCommand = client.clientName.lowercased()
         }
-        return "export ANTHROPIC_BASE_URL=http://localhost:\(client.port) && \\\(toolCommand)"
+        // Gateway hint headers let the traffic list label subagent, compaction and auxiliary requests.
+        let hintHeaders = toolCommand == "claude" ? " CLAUDE_CODE_GATEWAY_HINT_HEADERS=1" : ""
+        return "export ANTHROPIC_BASE_URL=http://localhost:\(client.port)\(hintHeaders) && \\\(toolCommand)"
     }
 
     var body: some View {

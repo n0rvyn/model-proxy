@@ -65,6 +65,47 @@ struct ProxyForwarderTests {
         }
     }
 
+    @Test func claudeCodeHeadersGiveSessionAndAgentCoordinationScope() {
+        let main: HTTPHeaders = ["X-Claude-Code-Session-Id": "sess-1"]
+        let subagent: HTTPHeaders = ["X-Claude-Code-Session-Id": "sess-1", "x-claude-code-agent-id": "agent-7"]
+
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: main, clientName: "Claude Code")
+            == "Claude Code|cc-session|sess-1")
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: subagent, clientName: "Claude Code")
+            == "Claude Code|cc-session|sess-1|agent|agent-7")
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: [:], clientName: "Claude Code") == nil)
+    }
+
+    @Test func claudeCodeRequestClassComesFromHintHeaderOrAgentID() {
+        #expect(ProxyForwarder.claudeCodeRequestClass(from: ["x-claude-code-request-class": "compaction"]) == .compaction)
+        #expect(ProxyForwarder.claudeCodeRequestClass(from: ["x-claude-code-agent-id": "agent-7"]) == .subagent)
+        #expect(ProxyForwarder.claudeCodeRequestClass(from: ["x-claude-code-request-class": "unknown-class"]) == nil)
+        #expect(ProxyForwarder.claudeCodeRequestClass(from: [:]) == nil)
+    }
+
+    @Test func mappedVendorsDoNotReceiveClaudeCodeHeadersOrClientCredentials() {
+        let request: HTTPHeaders = [
+            "x-api-key": "client-key",
+            "anthropic-version": "2023-06-01",
+            "X-Claude-Code-Session-Id": "sess-1",
+            "x-claude-code-agent-id": "agent-7",
+            "Host": "localhost:8080"
+        ]
+        let mapped = countTokensTarget(supportsCountTokens: true, isPassthrough: false)
+        let passthrough = countTokensTarget(supportsCountTokens: true, isPassthrough: true)
+
+        let vendorHeaders = ProxyForwarder.upstreamHeaders(from: request, target: mapped)
+        #expect(!vendorHeaders.contains(name: "x-claude-code-session-id"))
+        #expect(!vendorHeaders.contains(name: "x-claude-code-agent-id"))
+        #expect(vendorHeaders["x-api-key"] == ["vendor-key"])
+        #expect(vendorHeaders["anthropic-version"] == ["2023-06-01"])
+        #expect(vendorHeaders["host"] == ["api.deepseek.com"])
+
+        let passthroughHeaders = ProxyForwarder.upstreamHeaders(from: request, target: passthrough)
+        #expect(passthroughHeaders["x-claude-code-session-id"] == ["sess-1"])
+        #expect(passthroughHeaders["x-api-key"] == ["client-key"])
+    }
+
     @Test func countTokensIsAnsweredLocallyWhenVendorLacksEndpoint() {
         let vendor = countTokensTarget(supportsCountTokens: false, isPassthrough: false)
 

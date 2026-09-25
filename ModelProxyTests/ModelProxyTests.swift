@@ -342,6 +342,17 @@ struct ModelProxyTests {
         #expect(mappings[1].isEnabled == true)
     }
 
+    @Test func trafficEntryLabelsNonMainRequestClassesAndDimsAuxiliaryOnes() {
+        let entry = TrafficEntry(model: "claude-opus-5-5", routeType: .passthrough, requestKind: .generation, httpStatus: 200)
+
+        #expect(entry.displayModelLabel == "claude-opus-5-5")
+        #expect(entry.with(requestClass: .main).displayModelLabel == "claude-opus-5-5")
+        #expect(entry.with(requestClass: .subagent).displayModelLabel == "claude-opus-5-5 · subagent")
+        #expect(!entry.with(requestClass: .subagent).isAuxiliaryTraffic)
+        #expect(entry.with(requestClass: .auxiliary).isAuxiliaryTraffic)
+        #expect(entry.with(requestClass: .compaction).accessibilitySummary.hasPrefix("claude-opus-5-5 · compaction, pass"))
+    }
+
     @Test func knownAnthropicModelsListClaudeFiveFamilyAsCurrentWithoutDuplicates() {
         for model in ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1"] {
             #expect(KnownAnthropicModels.current.contains(model))

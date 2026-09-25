@@ -358,14 +358,14 @@ private struct TrafficRowView: View {
 
             Text(entry.displayModelLabel)
                 .font(.caption2)
-                .foregroundStyle(entry.requestKind.isAuxiliary ? .secondary : .primary)
+                .foregroundStyle(entry.isAuxiliaryTraffic ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(entry.routeDisplayLabel)
                 .font(.caption2)
-                .foregroundStyle(entry.requestKind.isAuxiliary ? .tertiary : .secondary)
+                .foregroundStyle(entry.isAuxiliaryTraffic ? .tertiary : .secondary)
                 .lineLimit(1)
 
             Text("\(entry.httpStatus)")
@@ -385,7 +385,7 @@ private struct TrafficRowView: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 3)
-        .opacity(entry.requestKind.isAuxiliary ? 0.82 : 1)
+        .opacity(entry.isAuxiliaryTraffic ? 0.82 : 1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(entry.accessibilitySummary)
     }
