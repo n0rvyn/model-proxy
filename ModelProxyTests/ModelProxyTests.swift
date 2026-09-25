@@ -342,6 +342,23 @@ struct ModelProxyTests {
         #expect(mappings[1].isEnabled == true)
     }
 
+    @Test func knownAnthropicModelsListClaudeFiveFamilyAsCurrentWithoutDuplicates() {
+        for model in ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1"] {
+            #expect(KnownAnthropicModels.current.contains(model))
+        }
+        #expect(KnownAnthropicModels.legacy.contains("claude-opus-4-7"))
+        #expect(KnownAnthropicModels.legacy.contains("claude-sonnet-4-6"))
+        #expect(Set(KnownAnthropicModels.all).count == KnownAnthropicModels.all.count)
+    }
+
+    @Test func modelPriceLookupDistinguishesClaudeFiveTiersByLongestPrefix() {
+        #expect(ModelPrice.lookup("claude-opus-5-5", overrides: [:]) == ModelPrice(inputPerMillion: 4, outputPerMillion: 20))
+        #expect(ModelPrice.lookup("claude-opus-5", overrides: [:]) == ModelPrice(inputPerMillion: 5, outputPerMillion: 25))
+        #expect(ModelPrice.lookup("claude-fable-5-1", overrides: [:]) == ModelPrice(inputPerMillion: 10, outputPerMillion: 50))
+        #expect(ModelPrice.lookup("claude-sonnet-5", overrides: [:]) == ModelPrice(inputPerMillion: 2, outputPerMillion: 10))
+        #expect(ModelPrice.lookup("claude-sonnet-4-6", overrides: [:]) == ModelPrice(inputPerMillion: 3, outputPerMillion: 15))
+    }
+
     @Test func knownAnthropicModelsObservedSuggestionsAreNewestFirstDedupedAndExcludeStaticPresets() {
         let suggestions = KnownAnthropicModels.observedSuggestions(from: [
             "claude-custom-a",
