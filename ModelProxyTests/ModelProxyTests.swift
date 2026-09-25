@@ -444,6 +444,13 @@ struct ModelProxyTests {
         }
     }
 
+    @Test func passthroughTargetWaitsAsLongAsClaudeCodeDefaultTimeout() {
+        let client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
+        let snapshot = RoutingSnapshot(from: AppConfig(vendors: [], clients: [client], modelMappings: []), for: client)
+
+        #expect(snapshot.passthroughTarget(originalAPIKey: "k").readTimeoutSeconds == 600)
+    }
+
     // MARK: - RoutingSnapshot: mapped model
 
     @Test func routingSnapshotResolvesMappedModel() {

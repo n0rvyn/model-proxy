@@ -774,9 +774,10 @@ enum ProxyForwarder {
         upstreamRequest.body = .bytes(bodyData)
 
         do {
-            // Note: readTimeoutSeconds is used as the overall request deadline (connect + transfer).
-            // AsyncHTTPClient doesn't support per-request connect timeout; connectTimeoutSeconds
-            // is set at the HTTPClient pool level in ProxyServer.start().
+            // Note: readTimeoutSeconds bounds the time until the response head arrives. AsyncHTTPClient
+            // cancels this deadline once `execute` returns, so streamed bodies are not cut off; a
+            // non-streaming response must finish within it. AsyncHTTPClient doesn't support a
+            // per-request connect timeout; connectTimeoutSeconds is set on the pool in ProxyServer.start().
             return try await httpClient.execute(upstreamRequest, timeout: .seconds(Int64(target.readTimeoutSeconds)))
         } catch {
             AppLog.proxy.error("[Proxy] [\(requestID)] Upstream error for \(target.vendorName): \(error)")
