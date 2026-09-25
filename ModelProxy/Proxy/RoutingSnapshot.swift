@@ -215,6 +215,10 @@ struct RoutingSnapshot: Sendable {
         }
     }
 
+    /// Matches Claude Code's own `API_TIMEOUT_MS` default so a slow non-streaming passthrough
+    /// response is not cut off by the proxy before Claude Code itself would give up.
+    static let passthroughResponseTimeoutSeconds = 600
+
     func passthroughTarget(originalAPIKey: String) -> RouteTarget {
         RouteTarget(
             baseURL: passthroughBaseURL,
@@ -224,7 +228,7 @@ struct RoutingSnapshot: Sendable {
             targetModel: nil,
             isPassthrough: true,
             connectTimeoutSeconds: 10,
-            readTimeoutSeconds: 120,
+            readTimeoutSeconds: Self.passthroughResponseTimeoutSeconds,
             signingDomain: SigningDomain.infer(fromBaseURL: passthroughBaseURL),
             replayPolicy: .transparent,
             supportsThinkingBlocks: true,
