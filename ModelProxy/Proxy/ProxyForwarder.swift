@@ -49,6 +49,13 @@ enum ProxyForwarder {
     ) async {
         let requestID = String(UUID().uuidString.prefix(8))
         let startTime = Date.now
+
+        // 0. Connection probes carry no model to route by; answer them without touching upstreams.
+        if Self.isLocalProbe(head) {
+            await Self.sendResponse(channel: channel, status: .ok, contentType: nil, body: Data())
+            return
+        }
+
         let requestKind = requestKind(for: head.uri)
         let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
         let requestScopes = requestScopeKeys(
@@ -487,6 +494,12 @@ enum ProxyForwarder {
             outputTokens: capturedOutputTokens
         )
         await MainActor.run { trafficLog.append(entry) }
+    }
+
+    /// Claude Code sends a fire-and-forget `HEAD /api/hello` to warm the connection at startup.
+    /// No Messages API endpoint accepts HEAD, so every HEAD request is answered locally.
+    static func isLocalProbe(_ head: HTTPRequestHead) -> Bool {
+        head.method == .HEAD
     }
 
     private static func requestKind(for uri: String) -> TrafficEntry.RequestKind {
@@ -1134,21 +1147,31 @@ enum ProxyForwarder {
     }
 
     static func sendError(channel: any Channel, status: HTTPResponseStatus, message: String) async {
-        let bodyData = Data(message.utf8)
+        await sendResponse(channel: channel, status: status, contentType: "text/plain", body: Data(message.utf8))
+    }
+
+    /// Write a complete proxy-generated response with an explicit `Content-Length`, then close.
+    static func sendResponse(
+        channel: any Channel,
+        status: HTTPResponseStatus,
+        contentType: String?,
+        body bodyData: Data
+    ) async {
         var responseHead = HTTPResponseHead(version: .http1_1, status: status)
-        responseHead.headers.add(name: "Content-Type", value: "text/plain")
+        if let contentType {
+            responseHead.headers.add(name: "Content-Type", value: contentType)
+        }
         responseHead.headers.add(name: "Content-Length", value: "\(bodyData.count)")
         responseHead.headers.add(name: "Connection", value: "close")
 
-        var buf = channel.allocator.buffer(capacity: bodyData.count)
-        buf.writeBytes(bodyData)
-
-        _ = try? await channel.write(
-            NIOAny(HTTPServerResponsePart.head(responseHead))
-        ).get()
-        _ = try? await channel.write(
-            NIOAny(HTTPServerResponsePart.body(.byteBuffer(buf)))
-        ).get()
+        // Queue head and body without awaiting: an unflushed write's future only completes on flush,
+        // so awaiting it here would stall before the flush below.
+        channel.write(NIOAny(HTTPServerResponsePart.head(responseHead)), promise: nil)
+        if !bodyData.isEmpty {
+            var buf = channel.allocator.buffer(capacity: bodyData.count)
+            buf.writeBytes(bodyData)
+            channel.write(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buf))), promise: nil)
+        }
         _ = try? await channel.writeAndFlush(
             NIOAny(HTTPServerResponsePart.end(nil))
         ).get()
