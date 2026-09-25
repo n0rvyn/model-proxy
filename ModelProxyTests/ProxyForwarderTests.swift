@@ -1,4 +1,7 @@
 import Foundation
+import NIOCore
+import NIOEmbedded
+import NIOHTTP1
 import Testing
 @testable import ModelProxy
 
@@ -12,6 +15,54 @@ struct ProxyForwarderTests {
         #expect(budget.recordWait() == true)
         #expect(budget.recordWait() == false)
         #expect(budget.attempts == 4)
+    }
+
+    @Test func headProbeIsAnsweredLocally() {
+        let probe = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: "/api/hello")
+        let messages = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/messages?beta=true")
+
+        #expect(ProxyForwarder.isLocalProbe(probe))
+        #expect(!ProxyForwarder.isLocalProbe(messages))
+    }
+
+    @Test func sendResponseWithEmptyBodyWritesZeroContentLengthAndNoBodyPart() async throws {
+        let channel = EmbeddedChannel()
+
+        await ProxyForwarder.sendResponse(channel: channel, status: .ok, contentType: nil, body: Data())
+
+        let headPart = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .head(let head) = headPart else {
+            Issue.record("Expected response head"); return
+        }
+        #expect(head.status == .ok)
+        #expect(head.headers["content-length"] == ["0"])
+        #expect(!head.headers.contains(name: "content-type"))
+        let endPart = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .end = endPart else {
+            Issue.record("Expected response end directly after head"); return
+        }
+    }
+
+    @Test func sendErrorWritesHeadBodyAndEndWithoutWaitingForAFlush() async throws {
+        let channel = EmbeddedChannel()
+
+        await ProxyForwarder.sendError(channel: channel, status: .badGateway, message: "Upstream unreachable")
+
+        let headPart = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .head(let head) = headPart else {
+            Issue.record("Expected response head"); return
+        }
+        #expect(head.status == .badGateway)
+        #expect(head.headers["content-length"] == ["20"])
+        let bodyPart = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .body(.byteBuffer(let buffer)) = bodyPart else {
+            Issue.record("Expected response body"); return
+        }
+        #expect(buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes) == "Upstream unreachable")
+        let endPart = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .end = endPart else {
+            Issue.record("Expected response end"); return
+        }
     }
 
     @Test func countTokensBypassesMappedVendorWhenUnsupported() {
