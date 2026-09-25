@@ -38,10 +38,6 @@ actor RequestRouter {
         snapshot.targets(for: model)
     }
 
-    func passthroughTarget(originalAPIKey: String) -> RoutingSnapshot.RouteTarget {
-        snapshot.passthroughTarget(originalAPIKey: originalAPIKey)
-    }
-
     /// Write back mutated failover state from ProxyForwarder.
     func updateRouteState(model: String, state: RoutingSnapshot.RouteState) {
         snapshot.updateRouteState(for: model, state: state)

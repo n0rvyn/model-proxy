@@ -23,15 +23,6 @@ enum ProxyForwarder {
         }
     }
 
-    struct EffectiveTargetDecision: Sendable {
-        let target: RoutingSnapshot.RouteTarget
-        let bypassedVendorName: String?
-
-        var didBypass: Bool {
-            bypassedVendorName != nil
-        }
-    }
-
     static func forward(
         clientName: String,
         head: HTTPRequestHead,
@@ -95,17 +86,28 @@ enum ProxyForwarder {
             return
         }
 
-        let passthroughTarget = await router.passthroughTarget(originalAPIKey: originalAPIKey)
-        let targetDecision = Self.effectiveTarget(
-            for: requestKind,
-            resolvedTarget: resolvedTarget,
-            passthroughTarget: passthroughTarget
-        )
-        let target = targetDecision.target
-        if let bypassedVendorName = targetDecision.bypassedVendorName {
+        let target = resolvedTarget
+        if Self.answersCountTokensLocally(requestKind: requestKind, target: target) {
+            // Token counting is optional for Claude Code: on a 404 it falls back to a local estimate.
+            // Never answer 501 here; Claude Code turns a 501 into a real one-token generation request.
             AppLog.proxy.info(
-                "[Proxy] [\(requestID)] count_tokens bypass vendor=\(bypassedVendorName) defaultUpstream=\(target.baseURL)"
+                "[Proxy] [\(requestID)] count_tokens unsupported by vendor=\(target.vendorName); answered 404 locally"
             )
+            await Self.sendResponse(
+                channel: channel,
+                status: .notFound,
+                contentType: "application/json",
+                body: Self.countTokensUnsupportedBody(vendorName: target.vendorName)
+            )
+            let entry = TrafficEntry(
+                model: model,
+                routeType: .mapped(targetModel: target.targetModel ?? model),
+                requestKind: .countTokens,
+                httpStatus: 404,
+                duration: Date.now.timeIntervalSince(startTime)
+            )
+            await MainActor.run { trafficLog.append(entry) }
+            return
         }
 
         // Log request routing (no API keys or body content).
@@ -514,20 +516,24 @@ enum ProxyForwarder {
         }
     }
 
-    static func effectiveTarget(
-        for requestKind: TrafficEntry.RequestKind,
-        resolvedTarget: RoutingSnapshot.RouteTarget,
-        passthroughTarget: RoutingSnapshot.RouteTarget
-    ) -> EffectiveTargetDecision {
-        guard requestKind == .countTokens,
-              !resolvedTarget.isPassthrough,
-              !resolvedTarget.supportsAnthropicCountTokens else {
-            return EffectiveTargetDecision(target: resolvedTarget, bypassedVendorName: nil)
-        }
-        return EffectiveTargetDecision(
-            target: passthroughTarget,
-            bypassedVendorName: resolvedTarget.vendorName
-        )
+    /// Vendors without Anthropic `count_tokens` support get a local 404 instead of a forwarded request.
+    static func answersCountTokensLocally(
+        requestKind: TrafficEntry.RequestKind,
+        target: RoutingSnapshot.RouteTarget
+    ) -> Bool {
+        requestKind == .countTokens && !target.isPassthrough && !target.supportsAnthropicCountTokens
+    }
+
+    /// Anthropic-shaped error body for a locally answered `count_tokens` request.
+    static func countTokensUnsupportedBody(vendorName: String) -> Data {
+        let body: [String: Any] = [
+            "type": "error",
+            "error": [
+                "type": "not_found_error",
+                "message": "Token counting is not supported by \(vendorName). ModelProxy answered locally; Claude Code falls back to a local estimate."
+            ]
+        ]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     }
 
     static func toolCallGuard(
