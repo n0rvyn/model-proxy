@@ -52,6 +52,15 @@ struct TrafficEntry: Identifiable, Sendable {
         }
     }
 
+    /// What kind of Claude Code request this was, from its gateway hint headers.
+    enum RequestClass: String, Sendable, Equatable {
+        case main
+        case subagent
+        case workflow
+        case compaction
+        case auxiliary
+    }
+
     let id: UUID
     let model: String
     let routeType: RouteType
@@ -63,6 +72,8 @@ struct TrafficEntry: Identifiable, Sendable {
     let duration: TimeInterval?
     /// Output tokens from this request; nil when unavailable (blocked, replay, or no usage data).
     let outputTokens: Int?
+    /// Claude Code request class; nil when the client sent no hint.
+    private(set) var requestClass: RequestClass?
 
     init(
         model: String,
@@ -83,16 +94,31 @@ struct TrafficEntry: Identifiable, Sendable {
         self.timestamp = timestamp
     }
 
+    func with(requestClass: RequestClass?) -> TrafficEntry {
+        var copy = self
+        copy.requestClass = requestClass
+        return copy
+    }
+
+    /// Side requests (token counting, titles, classifiers) are shown dimmed.
+    var isAuxiliaryTraffic: Bool {
+        requestKind.isAuxiliary || requestClass == .auxiliary
+    }
+
     var displayModelLabel: String {
+        let label: String
         switch requestKind {
         case .webSearchBridge(let searchCount):
             if searchCount == 1 {
-                return "Web Search - \(model)"
+                label = "Web Search - \(model)"
+            } else {
+                label = "Web Search (\(searchCount)) - \(model)"
             }
-            return "Web Search (\(searchCount)) - \(model)"
         case .generation, .countTokens, .auxiliary, .blocked:
-            return model
+            label = model
         }
+        guard let requestClass, requestClass != .main else { return label }
+        return "\(label) · \(requestClass.rawValue)"
     }
 
     var routeDisplayLabel: String {
@@ -133,7 +159,7 @@ struct TrafficEntry: Identifiable, Sendable {
             let countLabel = searchCount == 1 ? "1 search" : "\(searchCount) searches"
             return "Web Search, \(model), \(countLabel), \(routeDisplayLabel), HTTP \(httpStatus), \(durationDisplayText), \(tpsDisplayText) t/s"
         case .generation, .countTokens, .auxiliary, .blocked:
-            return "\(model), \(routeDisplayLabel), HTTP \(httpStatus), \(durationDisplayText), \(tpsDisplayText) t/s"
+            return "\(displayModelLabel), \(routeDisplayLabel), HTTP \(httpStatus), \(durationDisplayText), \(tpsDisplayText) t/s"
         }
     }
 }

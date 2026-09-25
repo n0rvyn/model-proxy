@@ -51,9 +51,11 @@ enum ProxyForwarder {
         let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
         let requestScopes = requestScopeKeys(
             bodyData: originalBodyData,
+            headers: head.headers,
             clientName: clientName,
             channel: channel
         )
+        let requestClass = Self.claudeCodeRequestClass(from: head.headers)
 
         // 1. Extract original API key (support both x-api-key and Authorization: Bearer).
         let originalAPIKey = Self.extractAPIKey(from: head.headers)
@@ -81,7 +83,7 @@ enum ProxyForwarder {
                 requestKind: .blocked,
                 httpStatus: 403
             )
-            await MainActor.run { trafficLog.append(blockedEntry) }
+            await MainActor.run { trafficLog.append(blockedEntry.with(requestClass: requestClass)) }
             await Self.sendError(channel: channel, status: .forbidden, message: reason)
             return
         }
@@ -106,7 +108,7 @@ enum ProxyForwarder {
                 httpStatus: 404,
                 duration: Date.now.timeIntervalSince(startTime)
             )
-            await MainActor.run { trafficLog.append(entry) }
+            await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
             return
         }
 
@@ -182,7 +184,7 @@ enum ProxyForwarder {
                     httpStatus: cachedResponse.statusCode,
                     duration: duration
                 )
-                await MainActor.run { trafficLog.append(entry) }
+                await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
                 return
             case .waited:
                 // This path also does not own a lease. It only waits for the leader to finish, then
@@ -241,7 +243,7 @@ enum ProxyForwarder {
                         httpStatus: replay.statusCode,
                         duration: duration
                     )
-                    await MainActor.run { trafficLog.append(entry) }
+                    await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
                 } else {
                     await Self.sendError(
                         channel: channel,
@@ -259,7 +261,7 @@ enum ProxyForwarder {
                         httpStatus: 409,
                         duration: duration
                     )
-                    await MainActor.run { trafficLog.append(entry) }
+                    await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
                 }
                 return
             }
@@ -368,7 +370,7 @@ enum ProxyForwarder {
                     duration: duration,
                     outputTokens: bridgeResult.outputTokens
                 )
-                await MainActor.run { trafficLog.append(entry) }
+                await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
                 return
             } catch {
                 await router.updateRouteState(model: model, state: routeState)
@@ -387,7 +389,7 @@ enum ProxyForwarder {
                     httpStatus: 502,
                     duration: duration
                 )
-                await MainActor.run { trafficLog.append(entry) }
+                await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
                 await Self.sendError(channel: channel, status: .badGateway, message: "WebSearch bridge failed: \(error)")
                 return
             }
@@ -433,7 +435,7 @@ enum ProxyForwarder {
                 httpStatus: 502,
                 duration: duration
             )
-            await MainActor.run { trafficLog.append(entry) }
+            await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
             await Self.sendError(channel: channel, status: .badGateway, message: "Upstream unreachable")
             return
         }
@@ -495,7 +497,7 @@ enum ProxyForwarder {
             duration: duration,
             outputTokens: capturedOutputTokens
         )
-        await MainActor.run { trafficLog.append(entry) }
+        await MainActor.run { trafficLog.append(entry.with(requestClass: requestClass)) }
     }
 
     /// Claude Code sends a fire-and-forget `HEAD /api/hello` to warm the connection at startup.
@@ -558,8 +560,13 @@ enum ProxyForwarder {
         let coordinationScopeKey: String?
     }
 
+    static let claudeCodeSessionHeader = "x-claude-code-session-id"
+    static let claudeCodeAgentHeader = "x-claude-code-agent-id"
+    static let claudeCodeRequestClassHeader = "x-claude-code-request-class"
+
     private static func requestScopeKeys(
         bodyData: Data,
+        headers: HTTPHeaders,
         clientName: String,
         channel: any Channel
     ) -> RequestScopeKeys {
@@ -570,11 +577,41 @@ enum ProxyForwarder {
                 coordinationScopeKey: explicitScopeKey
             )
         }
+        // Claude Code identifies its session (and each subagent) in headers. Use them only to
+        // coordinate in-flight requests: persistent branch reuse stays content-addressed, so a
+        // `/branch` fork or a resumed session still finds the vendor transcript it continues.
+        if let coordinationScopeKey = claudeCodeCoordinationScopeKey(headers: headers, clientName: clientName) {
+            return RequestScopeKeys(sessionScopeKey: nil, coordinationScopeKey: coordinationScopeKey)
+        }
         let channelIdentity = ObjectIdentifier(channel as AnyObject)
         return RequestScopeKeys(
             sessionScopeKey: nil,
             coordinationScopeKey: "\(clientName)|channel|\(channelIdentity)"
         )
+    }
+
+    static func claudeCodeCoordinationScopeKey(headers: HTTPHeaders, clientName: String) -> String? {
+        guard let sessionID = headers.first(name: claudeCodeSessionHeader), !sessionID.isEmpty else {
+            return nil
+        }
+        var key = "\(clientName)|cc-session|\(sessionID)"
+        if let agentID = headers.first(name: claudeCodeAgentHeader), !agentID.isEmpty {
+            key += "|agent|\(agentID)"
+        }
+        return key
+    }
+
+    /// Reads `x-claude-code-request-class` (sent with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`);
+    /// without it, a subagent is still recognizable by its agent id header.
+    static func claudeCodeRequestClass(from headers: HTTPHeaders) -> TrafficEntry.RequestClass? {
+        if let value = headers.first(name: claudeCodeRequestClassHeader),
+           let requestClass = TrafficEntry.RequestClass(rawValue: value.lowercased()) {
+            return requestClass
+        }
+        if let agentID = headers.first(name: claudeCodeAgentHeader), !agentID.isEmpty {
+            return .subagent
+        }
+        return nil
     }
 
     private static func explicitSessionScopeKey(from bodyData: Data) -> String? {
@@ -705,24 +742,7 @@ enum ProxyForwarder {
         let finalURLString = target.baseURL.trimmingCharacters(in: .init(charactersIn: "/")) + head.uri
         guard URL(string: finalURLString) != nil else { return nil }
 
-        // Build headers.
-        var upstreamHeaders = HTTPHeaders()
-        for (name, value) in head.headers {
-            let lower = name.lowercased()
-            if lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length" || lower == "accept-encoding" { continue }
-            upstreamHeaders.add(name: name, value: value)
-        }
-        upstreamHeaders.add(name: "Accept-Encoding", value: "gzip, deflate")
-        if !target.isPassthrough {
-            upstreamHeaders.remove(name: "authorization")
-            upstreamHeaders.remove(name: "x-api-key")
-            upstreamHeaders.add(name: "Authorization", value: "Bearer \(target.apiKey)")
-            upstreamHeaders.add(name: "x-api-key", value: target.apiKey)
-        }
-        if let host = URL(string: target.baseURL)?.host {
-            upstreamHeaders.remove(name: "host")
-            upstreamHeaders.add(name: "Host", value: host)
-        }
+        let upstreamHeaders = Self.upstreamHeaders(from: head.headers, target: target)
 
         // Replace model field using prepared body.
         var bodyData = bodyData
@@ -752,6 +772,31 @@ enum ProxyForwarder {
             AppLog.proxy.error("[Proxy] [\(requestID)] Upstream error for \(target.vendorName): \(error)")
             return nil
         }
+    }
+
+    /// Headers sent upstream: hop-by-hop headers dropped, and for mapped vendors the vendor's key
+    /// replaces the client's credentials.
+    static func upstreamHeaders(from requestHeaders: HTTPHeaders, target: RoutingSnapshot.RouteTarget) -> HTTPHeaders {
+        var upstreamHeaders = HTTPHeaders()
+        for (name, value) in requestHeaders {
+            let lower = name.lowercased()
+            if lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length" || lower == "accept-encoding" { continue }
+            // Claude Code session/agent identifiers are meant for the local gateway, not third-party vendors.
+            if !target.isPassthrough, lower.hasPrefix("x-claude-code-") { continue }
+            upstreamHeaders.add(name: name, value: value)
+        }
+        upstreamHeaders.add(name: "Accept-Encoding", value: "gzip, deflate")
+        if !target.isPassthrough {
+            upstreamHeaders.remove(name: "authorization")
+            upstreamHeaders.remove(name: "x-api-key")
+            upstreamHeaders.add(name: "Authorization", value: "Bearer \(target.apiKey)")
+            upstreamHeaders.add(name: "x-api-key", value: target.apiKey)
+        }
+        if let host = URL(string: target.baseURL)?.host {
+            upstreamHeaders.remove(name: "host")
+            upstreamHeaders.add(name: "Host", value: host)
+        }
+        return upstreamHeaders
     }
 
     // MARK: - Helpers
