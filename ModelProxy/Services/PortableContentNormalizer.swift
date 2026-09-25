@@ -87,6 +87,7 @@ final class PortableSSEStreamNormalizer {
     private var guardRepairedCount = 0
     private var guardDroppedCount = 0
     private var guardReasons: [String] = []
+    private var emittedToolUseCount = 0
 
     nonisolated init(
         reducer: any BranchMergeReducing,
@@ -172,6 +173,18 @@ final class PortableSSEStreamNormalizer {
         }
 
         switch json["type"] as? String {
+        case "message_delta":
+            if var delta = json["delta"] as? [String: Any],
+               let stopReason = ToolCallInputGuard.stopReasonAfterGuard(
+                   delta["stop_reason"] as? String,
+                   remainingToolUseCount: emittedToolUseCount,
+                   droppedCount: guardDroppedCount
+               ),
+               stopReason != delta["stop_reason"] as? String {
+                delta["stop_reason"] = stopReason
+                json["delta"] = delta
+            }
+            return try encodeEvent(name: eventName, json: json)
         case "content_block_start":
             return try normalizeBlockStart(json: &json, eventName: eventName)
         case "content_block_delta":
@@ -199,15 +212,20 @@ final class PortableSSEStreamNormalizer {
         activeBlocks[originalIndex] = SSEContentBlockBuilder(block: visibleBlock)
 
         // In portable mode, remap all blocks into a contiguous visible index space.
-        // Non-portable blocks still need unique visible indices since they're relayed.
+        // Otherwise keep upstream indices; delayed tool_use blocks still need one to be re-emitted.
         if portableMode {
             visibleIndexMap[originalIndex] = nextVisibleIndex
             nextVisibleIndex += 1
+        } else {
+            visibleIndexMap[originalIndex] = originalIndex
         }
 
         if toolCallGuard != nil, isToolUse {
             delayedToolUseIndexes.insert(originalIndex)
             return nil
+        }
+        if isToolUse {
+            emittedToolUseCount += 1
         }
 
         if let visibleIndex = visibleIndexMap[originalIndex] {
@@ -297,6 +315,7 @@ final class PortableSSEStreamNormalizer {
         guardRepairedCount = 0
         guardDroppedCount = 0
         guardReasons.removeAll(keepingCapacity: false)
+        emittedToolUseCount = 0
     }
 
     private func encodeGuardedBlockEvents(index: Int, block: [String: Any]) throws -> Data? {
@@ -329,7 +348,11 @@ final class PortableSSEStreamNormalizer {
         }
         let transformed = toolCallGuard.transformContentBlocks([block])
         recordGuardTransform(transformed)
-        return transformed.blocks.first as? [String: Any]
+        let guarded = transformed.blocks.first as? [String: Any]
+        if (guarded?["type"] as? String)?.lowercased() == "tool_use" {
+            emittedToolUseCount += 1
+        }
+        return guarded
     }
 
     private func recordGuardTransform(_ transformed: ToolCallInputGuard.TransformResult) {

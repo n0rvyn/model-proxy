@@ -34,7 +34,7 @@ The diagnosis flow below answered it without ever reading a request/response bod
 |---|---|---|---|
 | `sanitizeToolsForVendor` (req: drop bad tool defs) | `ProxyForwarder.swift` | mapped vendors only (`if !target.isPassthrough`) | Skipped on passthrough |
 | `ToolUseIDNormalizer` (req: rewrite tool_use_id / tool_result_id) | `ToolUseIDNormalizer.swift` | always on Anthropic-signed routes | Only rewrites **invalid** IDs; deterministic + cached, so a tool_use and its matching tool_result map to the **same** new ID (pairing preserved). No-op for native `toolu_...` |
-| `ToolCallInputGuard` (resp: repair tool_use input) | `ToolCallInputGuard.swift`, gated by `Vendor.repairsAnthropicToolCalls` | only vendors with `repairsAnthropicToolCalls=true` — **default DeepSeek only** | Off on passthrough; when on, round-trips input through `JSONSerialization` (escapes preserved) |
+| `ToolCallInputGuard` (resp: repair tool_use shape) | `ToolCallInputGuard.swift`, gated by `Vendor.repairsAnthropicToolCalls` | only vendors with `repairsAnthropicToolCalls=true` — **default DeepSeek only** | Off on passthrough; when on, only fixes shape (string/non-object input → object, missing input/id, name trim/case) via `JSONSerialization`. Argument content is left for Claude Code to validate; only nameless calls are dropped (2026-09-25) |
 | portable-normalize (resp: project portable messages) | `PortableContentNormalizer.swift` | only when `branchContext != nil` | Round-trips through `JSONSerialization`; partial_json deltas accumulated then parsed once (no mid-escape split) |
 
 **Conclusion for a claude-* passthrough request:** none of these can corrupt tool-call content.
