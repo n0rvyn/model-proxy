@@ -35,7 +35,7 @@ All project documents use `docs/00-AI-CONTEXT.md` as the single source of truth.
 - Fixed bugs requiring context understanding
 - Made design decisions with trade-offs
 
-**Location:** `docs/05-features/feature-name.md`
+**Location:** `docs/05-features/<feature-name>.md`
 
 **Trigger method:** After completion, ask the user; for a full session handoff, prompt the user to run `/handoff` (that skill is `disable-model-invocation`, so the model cannot invoke it itself)
 
