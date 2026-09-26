@@ -56,29 +56,35 @@ struct VendorEditSheet: View {
                         .accessibilityLabel(showAPIKey ? "Hide API Key" : "Reveal API Key")
                     }
 
-                    Picker("Compatible Client", selection: $compatibleClientID) {
+                    Picker(selection: $compatibleClientID) {
                         Text("All Clients").tag(UUID?.none)
                         ForEach(configStore.config.clients) { client in
                             Text(client.clientName).tag(UUID?.some(client.id))
                         }
+                    } label: {
+                        OptionLabel(help: .compatibleClient)
                     }
 
-                    Picker("Signing Domain", selection: $signingDomain) {
+                    Picker(selection: $signingDomain) {
                         ForEach(SigningDomain.allCases, id: \.self) { domain in
                             Text(domain.displayName).tag(domain)
                         }
+                    } label: {
+                        OptionLabel(help: .signingDomain)
                     }
 
-                    Picker("Replay Policy", selection: $replayPolicy) {
+                    Picker(selection: $replayPolicy) {
                         ForEach(TranscriptReplayPolicy.allCases, id: \.self) { policy in
                             Text(policy.displayName).tag(policy)
                         }
+                    } label: {
+                        OptionLabel(help: .replayPolicy)
                     }
 
-                    Toggle("Supports Thinking Blocks", isOn: $supportsThinkingBlocks)
-                    Toggle("Supports Count Tokens", isOn: supportsAnthropicCountTokensBinding)
-                    Toggle("Repair Tool Call Inputs", isOn: repairsAnthropicToolCallsBinding)
-                    Toggle("Strip Claude-Only Request Fields", isOn: $stripsClaudeOnlyRequestFields)
+                    Toggle(isOn: $supportsThinkingBlocks) { OptionLabel(help: .supportsThinkingBlocks) }
+                    Toggle(isOn: supportsAnthropicCountTokensBinding) { OptionLabel(help: .supportsCountTokens) }
+                    Toggle(isOn: repairsAnthropicToolCallsBinding) { OptionLabel(help: .repairToolCallInputs) }
+                    Toggle(isOn: $stripsClaudeOnlyRequestFields) { OptionLabel(help: .stripClaudeOnlyRequestFields) }
                 }
 
                 Section {
@@ -354,4 +360,50 @@ private extension TranscriptReplayPolicy {
             return "Portable Blocks Only"
         }
     }
+}
+
+// MARK: - Option Help
+
+private extension OptionHelp {
+    static let compatibleClient = OptionHelp(
+        title: "Compatible Client",
+        whatItDoes: "Marks which client tool this vendor's API works with. A vendor tied to one client shows \"(client only)\" in the routing pickers and is skipped when another client's rule lists it as the backup.",
+        howToChoose: "Keep All Clients unless the endpoint speaks only one tool's API format, for example an Anthropic-format endpoint that only Claude Code can use."
+    )
+
+    static let signingDomain = OptionHelp(
+        title: "Signing Domain",
+        whatItDoes: "Tells ModelProxy whether this endpoint is Anthropic's own service. Anthropic API, Bedrock and Vertex check thinking signatures and tool IDs, so ModelProxy rewrites tool IDs that other vendors produced into the format they accept. It also sets the default Replay Policy.",
+        howToChoose: "It is filled in from the Base URL. Change it only when a custom gateway sits in front of Anthropic, Bedrock or Vertex. Every other vendor (DeepSeek, Kimi, MiniMax, ...) is Compatible Third-Party."
+    )
+
+    static let replayPolicy = OptionHelp(
+        title: "Replay Policy",
+        whatItDoes: "Portable Blocks Only keeps this vendor's own copy of each conversation, including its thinking, and puts that back when the history Claude Code sends no longer carries it, for example after switching models or resuming a session. Transparent Replay forwards the history as Claude Code sends it.",
+        howToChoose: "Transparent Replay for Anthropic, Bedrock and Vertex. Portable Blocks Only for third-party vendors. The default follows Signing Domain."
+    )
+
+    static let supportsThinkingBlocks = OptionHelp(
+        title: "Supports Thinking Blocks",
+        whatItDoes: "On: thinking blocks in the conversation history are sent to this vendor, with Anthropic signatures removed. Off: they are removed before the request is forwarded. Only used with Portable Blocks Only.",
+        howToChoose: "Keep it on for DeepSeek: it rejects a tool-call turn it did not produce itself, for example after switching from Claude mid-conversation, unless that turn's thinking is sent back. Turn it off only if the vendor rejects requests whose history contains thinking blocks."
+    )
+
+    static let supportsCountTokens = OptionHelp(
+        title: "Supports Count Tokens",
+        whatItDoes: "On: token-counting requests (/v1/messages/count_tokens) are forwarded to this vendor. Off: ModelProxy answers them locally with 404 and Claude Code estimates the count itself.",
+        howToChoose: "Keep it on. Turn it off only if the vendor returns errors for token counting."
+    )
+
+    static let repairToolCallInputs = OptionHelp(
+        title: "Repair Tool Call Inputs",
+        whatItDoes: "Fixes the shape of tool calls in this vendor's responses: arguments sent as a JSON string or missing, a missing call ID, and tool names with stray spaces or the wrong case. Argument values are left for Claude Code to check. A call with no tool name is removed.",
+        howToChoose: "Turn it on for vendors that sometimes return malformed tool calls. It is on by default for DeepSeek."
+    )
+
+    static let stripClaudeOnlyRequestFields = OptionHelp(
+        title: "Strip Claude-Only Request Fields",
+        whatItDoes: "Removes request fields that only Anthropic understands (context_management, output_config including effort, safeguards, speed, thread, and the strict, defer_loading and eager_input_streaming tool fields) plus the anthropic-beta header before forwarding.",
+        howToChoose: "Keep it off while the vendor accepts Claude Code's requests. Turn it on if the vendor rejects them with errors about unknown fields or beta headers."
+    )
 }
