@@ -9,8 +9,9 @@ documented compatibility behaviors ModelProxy applies (verified against CC 2.1.2
 | Behavior | When | What happens |
 |---|---|---|
 | Local HEAD probe | Any `HEAD` request (CC sends `HEAD /api/hello` at startup) | `200`, empty body, no traffic row, nothing forwarded |
-| Local `count_tokens` 404 | Mapped vendor with **Supports Count Tokens** off | Anthropic-shaped `404 not_found_error`; CC falls back to a local estimate. Never 501: CC turns 501 into a one-token generation |
-| Session coordination | Request carries `X-Claude-Code-Session-Id` (+ `x-claude-code-agent-id`) | In-flight branch coordination is scoped to that session/agent instead of the TCP channel. Persistent branch reuse stays content-addressed so `/branch` forks and resumes still match |
+| Local `count_tokens` 404 | Mapped vendor with **Supports Count Tokens** off (default on for every vendor, DeepSeek included) | Anthropic-shaped `404 not_found_error`; CC falls back to a local estimate. Never 501: CC turns 501 into a one-token generation |
+| WebSearch bridge limits | CC's WebSearch on a mapped vendor with a search provider configured | `max_uses` counts searches actually run. Over the limit, or after a provider error (e.g. Google 429 out of quota), the model gets an `is_error` tool result, the provider is not called again for that request, the client sees a `web_search_tool_result_error` (`max_uses_exceeded`, `too_many_requests`, `unavailable`, `invalid_input`), and the response is still `200`. The last allowed model turn is sent with `tool_choice: none`. Only a failed model turn returns 502 |
+| Session coordination | Request carries `X-Claude-Code-Session-Id` (+ `x-claude-code-agent-id`) | In-flight branch coordination is scoped to that session/agent plus a fingerprint of the body without `messages` (model, system, tools, params) instead of the TCP channel. A retry of the same request joins the one in flight; concurrent requests that share `messages` but differ elsewhere never get each other's response. Persistent branch reuse stays content-addressed so `/branch` forks and resumes still match |
 | Request class in traffic list | `x-claude-code-request-class` (needs `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, included in the Clients tab export command) or an agent-id header | Row label shows `· subagent`, `· compaction`, …; `auxiliary` rows are dimmed |
 | No `x-claude-code-*` to vendors | Mapped routes | Session/agent headers are not forwarded to third parties; passthrough keeps them |
 | Strip Claude-only fields (opt-in) | Vendor toggle **Strip Claude-Only Request Fields** | Removes `context_management`, `output_config`, `safeguards`, `speed`, `thread`, tool `strict`/`defer_loading`/`eager_input_streaming`, and the `anthropic-beta` header, per upstream attempt |
@@ -27,6 +28,8 @@ documented compatibility behaviors ModelProxy applies (verified against CC 2.1.2
 | `ModelProxy/Services/PortableContentNormalizer.swift` | SSE re-emission of guarded tool calls, `message_delta` stop reason |
 | `ModelProxy/Models/TrafficLog.swift` | `TrafficEntry.RequestClass`, labels, auxiliary dimming |
 | `ModelProxy/Models/Vendor.swift`, `ModelProxy/Proxy/RoutingSnapshot.swift` | `stripsClaudeOnlyRequestFields` flag and passthrough timeout |
+| `ModelProxy/Services/WebSearchBridge.swift` | Search budget, provider-error handling, final `tool_choice: none` turn |
+| `ModelProxy/Views/VendorEditSheet.swift`, `ModelProxy/Views/Components/OptionInfoButton.swift` | Vendor option help text and the ⓘ popover |
 
 ## Boundary Conditions
 
@@ -40,3 +43,7 @@ documented compatibility behaviors ModelProxy applies (verified against CC 2.1.2
 | Date | Change |
 |------|--------|
 | 2026-09-25 | Initial version from the CC 2.1.282 coverage audit (`docs/01-discovery/2026-09-25-claude-code-feature-coverage-audit.md`) |
+| 2026-09-26 | Session coordination scope gains a request-shape fingerprint: two concurrent same-session requests with identical `messages` and different system prompts got one shared response (reproduced against DeepSeek with CC 2.1.283) |
+| 2026-09-26 | Supports Count Tokens defaults on for DeepSeek too: `https://api.deepseek.com/anthropic/v1/messages/count_tokens` answers 200. Vendors already saved keep their stored value |
+| 2026-09-26 | WebSearch bridge no longer turns search-side limits or provider errors into 502. Before, CC retried each 502 turn and every retry reran all searches: one CC run made 12+ bridge attempts and used up a Google Custom Search daily quota |
+| 2026-09-26 | Vendor edit sheet: ⓘ button after each option opens what it does and how to choose. DeepSeek evidence for Supports Thinking Blocks: a tool-call turn DeepSeek did not produce is rejected (400 "content[].thinking in the thinking mode must be passed back") unless its thinking is sent; its own `call_…` ids pass without it |
