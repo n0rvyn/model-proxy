@@ -39,6 +39,8 @@ enum WebSearchBridge {
     private struct SearchObservation: Sendable {
         let toolCall: ToolCall
         let results: [WebSearchResult]
+        /// Anthropic `web_search_tool_result_error` code when this search did not run or failed.
+        var errorCode: String? = nil
     }
 
     struct StepOutcome: Sendable {
@@ -117,8 +119,62 @@ enum WebSearchBridge {
         var accumulatedInputTokens = 0
         var accumulatedOutputTokens = 0
         var searchObservations: [SearchObservation] = []
+        // `max_uses` bounds searches, as on Anthropic's server tool. Search-side problems (limit reached,
+        // provider error) go back to the model as tool errors and the request still ends with a 200:
+        // a non-2xx makes Claude Code retry the whole turn, which reruns every search.
+        var searchesRun = 0
+        var providerErrorCode: String?
+        let maxModelTurns = preparedRequest.maxUses + 2
 
-        for _ in 0..<preparedRequest.maxUses {
+        func finish(with responseBodyData: Data) throws -> WebSearchBridgeResult {
+            let normalized = try portableNormalizer.normalizeJSONBody(responseBodyData)
+            let completedSearchCount = searchObservations.filter { $0.errorCode == nil }.count
+            let branchBodyData = try bodyDataByReplacingUsage(
+                in: normalized.bodyData,
+                inputTokens: accumulatedInputTokens,
+                outputTokens: accumulatedOutputTokens,
+                webSearchRequestCount: nil
+            )
+            let clientBodyData = try bodyDataByReplacingUsage(
+                in: bodyDataByInsertingClientSearchBlocks(
+                    in: branchBodyData,
+                    observations: searchObservations
+                ),
+                inputTokens: accumulatedInputTokens,
+                outputTokens: accumulatedOutputTokens,
+                webSearchRequestCount: completedSearchCount
+            )
+            let trafficRequestKind = TrafficEntry.RequestKind.webSearchBridge(searchCount: completedSearchCount)
+            let clientResponse = preparedRequest.streamRequested
+                ? try synthesizeSSE(
+                    from: clientBodyData,
+                    inputTokens: accumulatedInputTokens,
+                    outputTokens: accumulatedOutputTokens,
+                    webSearchRequestCount: completedSearchCount,
+                    trafficRequestKind: trafficRequestKind
+                )
+                : ReplayableBranchResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    bodyChunks: [clientBodyData],
+                    trafficRequestKind: trafficRequestKind
+                )
+            let assistantTurn = try portableNormalizer.normalizeJSONBody(branchBodyData).assistantTurn
+            return WebSearchBridgeResult(
+                clientResponse: clientResponse,
+                webSearchRequestCount: completedSearchCount,
+                inputTokens: accumulatedInputTokens,
+                outputTokens: accumulatedOutputTokens,
+                assistantTurn: assistantTurn
+            )
+        }
+
+        for turn in 0..<maxModelTurns {
+            let isLastTurn = turn == maxModelTurns - 1
+            if isLastTurn {
+                // The model kept searching: this turn must answer from what it already has.
+                workingJSON["tool_choice"] = ["type": "none"]
+            }
             let response = try await performModelTurn(
                 try JSONSerialization.data(withJSONObject: workingJSON, options: [.sortedKeys])
             )
@@ -133,62 +189,48 @@ enum WebSearchBridge {
             }
 
             let outcome = try stepOutcome(from: response.bodyData)
-            let normalized = try portableNormalizer.normalizeJSONBody(response.bodyData)
-
             guard !outcome.toolCalls.isEmpty else {
-                let branchBodyData = try bodyDataByReplacingUsage(
-                    in: normalized.bodyData,
-                    inputTokens: accumulatedInputTokens,
-                    outputTokens: accumulatedOutputTokens,
-                    webSearchRequestCount: nil
-                )
-                let clientBodyData = try bodyDataByReplacingUsage(
-                    in: bodyDataByInsertingClientSearchBlocks(
-                        in: branchBodyData,
-                        observations: searchObservations
-                    ),
-                    inputTokens: accumulatedInputTokens,
-                    outputTokens: accumulatedOutputTokens,
-                    webSearchRequestCount: searchObservations.count
-                )
-                let trafficRequestKind = TrafficEntry.RequestKind.webSearchBridge(searchCount: searchObservations.count)
-                let clientResponse = preparedRequest.streamRequested
-                    ? try synthesizeSSE(
-                        from: clientBodyData,
-                        inputTokens: accumulatedInputTokens,
-                        outputTokens: accumulatedOutputTokens,
-                        webSearchRequestCount: searchObservations.count,
-                        trafficRequestKind: trafficRequestKind
-                    )
-                    : ReplayableBranchResponse(
-                        statusCode: 200,
-                        headers: [("content-type", "application/json")],
-                        bodyChunks: [clientBodyData],
-                        trafficRequestKind: trafficRequestKind
-                    )
-                let assistantTurn = try portableNormalizer.normalizeJSONBody(branchBodyData).assistantTurn
-                return WebSearchBridgeResult(
-                    clientResponse: clientResponse,
-                    webSearchRequestCount: searchObservations.count,
-                    inputTokens: accumulatedInputTokens,
-                    outputTokens: accumulatedOutputTokens,
-                    assistantTurn: assistantTurn
-                )
+                return try finish(with: response.bodyData)
+            }
+            guard !isLastTurn else {
+                return try finish(with: bodyDataByRemovingToolCalls(from: response.bodyData))
             }
 
             var resultBlocks: [[String: Any]] = []
             resultBlocks.reserveCapacity(outcome.toolCalls.count)
             for toolCall in outcome.toolCalls {
-                let results = try await provider.search(
-                    query: toolCall.query,
-                    maxResults: toolCall.maxResults,
-                    httpClient: httpClient
-                )
-                searchObservations.append(SearchObservation(toolCall: toolCall, results: results))
+                let errorCode: String
+                if let providerErrorCode {
+                    errorCode = providerErrorCode
+                } else if searchesRun >= preparedRequest.maxUses {
+                    errorCode = "max_uses_exceeded"
+                } else {
+                    searchesRun += 1
+                    do {
+                        let results = try await provider.search(
+                            query: toolCall.query,
+                            maxResults: toolCall.maxResults,
+                            httpClient: httpClient
+                        )
+                        searchObservations.append(SearchObservation(toolCall: toolCall, results: results))
+                        resultBlocks.append([
+                            "type": "tool_result",
+                            "tool_use_id": toolCall.id,
+                            "content": formatSearchResults(results, query: toolCall.query)
+                        ])
+                        continue
+                    } catch {
+                        // Stop calling a failing provider for the rest of this request.
+                        providerErrorCode = searchErrorCode(for: error)
+                        errorCode = providerErrorCode ?? "unavailable"
+                    }
+                }
+                searchObservations.append(SearchObservation(toolCall: toolCall, results: [], errorCode: errorCode))
                 resultBlocks.append([
                     "type": "tool_result",
                     "tool_use_id": toolCall.id,
-                    "content": formatSearchResults(results, query: toolCall.query)
+                    "is_error": true,
+                    "content": searchErrorMessage(for: errorCode)
                 ])
             }
 
@@ -203,6 +245,44 @@ enum WebSearchBridge {
         }
 
         throw WebSearchBridgeError.maxUsesExceeded(limit: preparedRequest.maxUses)
+    }
+
+    /// Anthropic `web_search_tool_result_error` code for a failed provider search.
+    nonisolated static func searchErrorCode(for error: Error) -> String {
+        switch error {
+        case WebSearchBridgeProviderError.upstreamFailure(statusCode: 429):
+            return "too_many_requests"
+        case WebSearchBridgeProviderError.invalidQuery:
+            return "invalid_input"
+        default:
+            return "unavailable"
+        }
+    }
+
+    nonisolated static func searchErrorMessage(for errorCode: String) -> String {
+        switch errorCode {
+        case "max_uses_exceeded":
+            return "Web search error (max_uses_exceeded): the search limit for this request is reached. Answer with the results you already have."
+        case "too_many_requests":
+            return "Web search error (too_many_requests): the search provider is rate limited or out of quota. Answer without further searches."
+        case "invalid_input":
+            return "Web search error (invalid_input): the query was empty or invalid."
+        default:
+            return "Web search error (unavailable): the search provider failed. Answer without further searches."
+        }
+    }
+
+    /// Final-turn fallback when the model still asks for searches: keep its text, drop the calls.
+    private nonisolated static func bodyDataByRemovingToolCalls(from responseBody: Data) throws -> Data {
+        var json = try jsonObject(responseBody)
+        let content = (json["content"] as? [[String: Any]]) ?? []
+        var kept = content.filter { ($0["type"] as? String)?.lowercased() != "tool_use" }
+        if !kept.contains(where: { ($0["type"] as? String)?.lowercased() == "text" }) {
+            kept.append(["type": "text", "text": "Web search stopped: the search limit for this request was reached."])
+        }
+        json["content"] = kept
+        json["stop_reason"] = "end_turn"
+        return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
     }
 
     nonisolated static func stepOutcome(
@@ -501,7 +581,12 @@ enum WebSearchBridge {
                 [
                     "type": "web_search_tool_result",
                     "tool_use_id": observation.toolCall.id,
-                    "content": observation.results.map { result in
+                    "content": observation.errorCode.map { errorCode -> Any in
+                        [
+                            "type": "web_search_tool_result_error",
+                            "error_code": errorCode
+                        ]
+                    } ?? observation.results.map { result in
                         [
                             "type": "web_search_result",
                             "title": result.title,
