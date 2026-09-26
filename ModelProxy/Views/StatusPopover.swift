@@ -106,7 +106,7 @@ struct StatusPopover: View {
                 proxyServer.boundPorts.sorted(by: { $0.key < $1.key }),
                 id: \.key
             ) { name, port in
-                Text("\(name):\(port)")
+                Text(verbatim: "\(name):\(port)")
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)

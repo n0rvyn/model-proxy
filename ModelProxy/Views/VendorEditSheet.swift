@@ -263,7 +263,7 @@ struct VendorEditSheet: View {
     }
 
     private func applyCapabilityDefaults(for baseURL: String) {
-        supportsAnthropicCountTokens = VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+        supportsAnthropicCountTokens = VendorDefaults.supportsAnthropicCountTokens
         repairsAnthropicToolCalls = VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
     }
 
