@@ -22,6 +22,9 @@ Packages/
 # macOS
 .DS_Store
 
+# Local secrets (API keys for scripts/e2e); this repo is public
+.env
+
 # Temp files
 /Screenshots
 /Icons
