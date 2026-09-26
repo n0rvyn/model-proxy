@@ -68,12 +68,32 @@ struct ProxyForwarderTests {
     @Test func claudeCodeHeadersGiveSessionAndAgentCoordinationScope() {
         let main: HTTPHeaders = ["X-Claude-Code-Session-Id": "sess-1"]
         let subagent: HTTPHeaders = ["X-Claude-Code-Session-Id": "sess-1", "x-claude-code-agent-id": "agent-7"]
+        let body = Data(#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+        let shape = ProxyForwarder.requestShapeFingerprint(body)
 
-        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: main, clientName: "Claude Code")
-            == "Claude Code|cc-session|sess-1")
-        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: subagent, clientName: "Claude Code")
-            == "Claude Code|cc-session|sess-1|agent|agent-7")
-        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: [:], clientName: "Claude Code") == nil)
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: main, bodyData: body, clientName: "Claude Code")
+            == "Claude Code|cc-session|sess-1|shape|\(shape)")
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: subagent, bodyData: body, clientName: "Claude Code")
+            == "Claude Code|cc-session|sess-1|agent|agent-7|shape|\(shape)")
+        #expect(ProxyForwarder.claudeCodeCoordinationScopeKey(headers: [:], bodyData: body, clientName: "Claude Code") == nil)
+    }
+
+    @Test func claudeCodeScopeSeparatesConcurrentRequestsThatOnlyShareMessages() {
+        let headers: HTTPHeaders = ["X-Claude-Code-Session-Id": "sess-1"]
+        func scope(_ json: String) -> String? {
+            ProxyForwarder.claudeCodeCoordinationScopeKey(headers: headers, bodyData: Data(json.utf8), clientName: "Claude Code")
+        }
+        let apple = #"{"model":"claude-sonnet-5","system":"Answer APPLE","messages":[{"role":"user","content":"word?"}]}"#
+        let banana = #"{"model":"claude-sonnet-5","system":"Answer BANANA","messages":[{"role":"user","content":"word?"}]}"#
+        let otherModel = #"{"model":"claude-haiku-4-5","system":"Answer APPLE","messages":[{"role":"user","content":"word?"}]}"#
+        let appleLaterTurn = #"{"system":"Answer APPLE","model":"claude-sonnet-5","messages":[{"role":"user","content":"word?"},{"role":"assistant","content":"APPLE"},{"role":"user","content":"again"}]}"#
+
+        // Same messages but a different system prompt or model must not share in-flight coordination.
+        #expect(scope(apple) != scope(banana))
+        #expect(scope(apple) != scope(otherModel))
+        // A retry or a later turn of the same request shape stays in one scope, regardless of key order.
+        #expect(scope(apple) == scope(apple))
+        #expect(scope(apple) == scope(appleLaterTurn))
     }
 
     @Test func claudeCodeRequestClassComesFromHintHeaderOrAgentID() {

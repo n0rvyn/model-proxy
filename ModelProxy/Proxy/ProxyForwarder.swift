@@ -595,7 +595,11 @@ enum ProxyForwarder {
         // Claude Code identifies its session (and each subagent) in headers. Use them only to
         // coordinate in-flight requests: persistent branch reuse stays content-addressed, so a
         // `/branch` fork or a resumed session still finds the vendor transcript it continues.
-        if let coordinationScopeKey = claudeCodeCoordinationScopeKey(headers: headers, clientName: clientName) {
+        if let coordinationScopeKey = claudeCodeCoordinationScopeKey(
+            headers: headers,
+            bodyData: bodyData,
+            clientName: clientName
+        ) {
             return RequestScopeKeys(sessionScopeKey: nil, coordinationScopeKey: coordinationScopeKey)
         }
         let channelIdentity = ObjectIdentifier(channel as AnyObject)
@@ -605,7 +609,11 @@ enum ProxyForwarder {
         )
     }
 
-    static func claudeCodeCoordinationScopeKey(headers: HTTPHeaders, clientName: String) -> String? {
+    /// The branch coordinator matches in-flight requests by vendor and message hashes only, so the
+    /// scope also carries a fingerprint of everything else in the body (model, system, tools, params).
+    /// A retry of the same request still joins the one in flight; a concurrent request in the same
+    /// session that shares `messages` but differs elsewhere never receives the other's response.
+    static func claudeCodeCoordinationScopeKey(headers: HTTPHeaders, bodyData: Data, clientName: String) -> String? {
         guard let sessionID = headers.first(name: claudeCodeSessionHeader), !sessionID.isEmpty else {
             return nil
         }
@@ -613,7 +621,17 @@ enum ProxyForwarder {
         if let agentID = headers.first(name: claudeCodeAgentHeader), !agentID.isEmpty {
             key += "|agent|\(agentID)"
         }
+        key += "|shape|\(requestShapeFingerprint(bodyData))"
         return key
+    }
+
+    static func requestShapeFingerprint(_ bodyData: Data) -> String {
+        guard var json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            return String(ConversationFingerprint().sha256Hex(bodyData).prefix(16))
+        }
+        json.removeValue(forKey: "messages")
+        let shapeData = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? bodyData
+        return String(ConversationFingerprint().sha256Hex(shapeData).prefix(16))
     }
 
     /// Reads `x-claude-code-request-class` (sent with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`);
