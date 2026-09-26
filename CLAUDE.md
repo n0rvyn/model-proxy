@@ -103,3 +103,7 @@ resolves into the container, NOT the bare `~/Library/Application Support/...`:
   — an Anthropic-format error (`request_id: req_011C...`) means that model is **passthrough
   to Anthropic**; a different vendor/error means it's mapped. See
   `docs/09-lessons-learned/2026-06-11-proxy-transform-diagnosis.md` for the tool-call transform gating table.
+- **Verify proxy behavior end to end with `scripts/e2e/`** (real Claude Code → isolated,
+  non-sandboxed E2E build on 19090/19092 → DeepSeek): `build.sh`, `up.sh`, `scenarios.sh`, `down.sh`.
+  It never touches the installed app or your own Claude Code config. Rules and scenario list:
+  `scripts/e2e/README.md`.
