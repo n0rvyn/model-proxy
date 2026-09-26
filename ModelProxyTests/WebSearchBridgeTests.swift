@@ -255,7 +255,69 @@ struct WebSearchBridgeTests {
         #expect(deltaServerToolUse["web_search_requests"] as? Int == 1)
     }
 
-    @Test func executeThrowsMaxUsesExceeded() async throws {
+    // Search-side limits and failures must end in a 200: Claude Code retries a non-2xx turn, and every
+    // retry reruns all of its searches (observed: 12 retries drained a Google daily quota).
+    @Test func executeCapsSearchesAtMaxUsesAndStillAnswers() async throws {
+        let normalizer = PortableContentNormalizer()
+        let httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        defer { try? httpClient.syncShutdown() }
+
+        var searchCount = 0
+        let provider = CountingWebSearchProvider { query in
+            searchCount += 1
+            return [WebSearchResult(title: "Result", url: "https://example.com/\(query)", snippet: "Snippet")]
+        }
+
+        var seenRequests: [[String: Any]] = []
+        let result = try await WebSearchBridge.execute(
+            bodyData: try requestBody(stream: false, maxUses: 2),
+            httpClient: httpClient,
+            portableNormalizer: normalizer,
+            provider: provider,
+            performModelTurn: { bodyData in
+                let json = try #require(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+                seenRequests.append(json)
+                if (json["tool_choice"] as? [String: Any])?["type"] as? String == "none" {
+                    return WebSearchBridge.ModelResponse(
+                        statusCode: 200,
+                        headers: [("content-type", "application/json")],
+                        bodyData: try assistantResponseBody(content: [
+                            ["type": "text", "text": "Answer from two searches."]
+                        ], usage: ["input_tokens": 10, "output_tokens": 4])
+                    )
+                }
+                return WebSearchBridge.ModelResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    bodyData: try assistantResponseBody(content: [
+                        ["type": "tool_use", "id": "toolu_\(seenRequests.count)", "name": "web_search", "input": ["query": "q\(seenRequests.count)"]]
+                    ], usage: ["input_tokens": 10, "output_tokens": 1])
+                )
+            }
+        )
+
+        #expect(searchCount == 2)
+        #expect(seenRequests.count == 4)
+        #expect(result.clientResponse.statusCode == 200)
+        #expect(result.webSearchRequestCount == 2)
+
+        // The third request told the model the limit was reached instead of failing the turn.
+        let thirdMessages = try #require(seenRequests[3]["messages"] as? [[String: Any]])
+        let limitResult = try #require((thirdMessages.last?["content"] as? [[String: Any]])?.first)
+        #expect(limitResult["is_error"] as? Bool == true)
+        #expect((limitResult["content"] as? String)?.contains("max_uses_exceeded") == true)
+
+        let finalBody = try #require(result.clientResponse.bodyChunks.first)
+        let finalJSON = try #require(try JSONSerialization.jsonObject(with: finalBody) as? [String: Any])
+        let content = try #require(finalJSON["content"] as? [[String: Any]])
+        let errorCodes = content
+            .filter { $0["type"] as? String == "web_search_tool_result" }
+            .compactMap { ($0["content"] as? [String: Any])?["error_code"] as? String }
+        #expect(errorCodes == ["max_uses_exceeded"])
+        #expect(content.contains { $0["text"] as? String == "Answer from two searches." })
+    }
+
+    @Test func executeEndsTurnWhenModelKeepsSearchingOnFinalTurn() async throws {
         let normalizer = PortableContentNormalizer()
         let httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
         defer { try? httpClient.syncShutdown() }
@@ -265,25 +327,88 @@ struct WebSearchBridgeTests {
         ])
 
         var turnCount = 0
-        await #expect(throws: WebSearchBridgeError.maxUsesExceeded(limit: 2)) {
-            _ = try await WebSearchBridge.execute(
-                bodyData: try requestBody(stream: false, maxUses: 2),
-                httpClient: httpClient,
-                portableNormalizer: normalizer,
-                provider: provider,
-                performModelTurn: { _ in
-                    turnCount += 1
+        let result = try await WebSearchBridge.execute(
+            bodyData: try requestBody(stream: false, maxUses: 1),
+            httpClient: httpClient,
+            portableNormalizer: normalizer,
+            provider: provider,
+            performModelTurn: { _ in
+                turnCount += 1
+                return WebSearchBridge.ModelResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    bodyData: try assistantResponseBody(content: [
+                        ["type": "tool_use", "id": "toolu_\(turnCount)", "name": "web_search", "input": ["query": "test"]]
+                    ], usage: ["input_tokens": 10, "output_tokens": 1])
+                )
+            }
+        )
+
+        #expect(turnCount == 3)
+        #expect(result.clientResponse.statusCode == 200)
+        let finalBody = try #require(result.clientResponse.bodyChunks.first)
+        let finalJSON = try #require(try JSONSerialization.jsonObject(with: finalBody) as? [String: Any])
+        let content = try #require(finalJSON["content"] as? [[String: Any]])
+        #expect(!content.contains { $0["type"] as? String == "tool_use" })
+        #expect(content.contains { $0["type"] as? String == "text" })
+        #expect(finalJSON["stop_reason"] as? String == "end_turn")
+    }
+
+    @Test func executeReportsProviderFailureToModelAndStopsSearching() async throws {
+        let normalizer = PortableContentNormalizer()
+        let httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        defer { try? httpClient.syncShutdown() }
+
+        var providerCalls = 0
+        let provider = FailingWebSearchProvider {
+            providerCalls += 1
+            return WebSearchBridgeProviderError.upstreamFailure(statusCode: 429)
+        }
+
+        var seenRequests: [[String: Any]] = []
+        let result = try await WebSearchBridge.execute(
+            bodyData: try requestBody(stream: true, maxUses: 8),
+            httpClient: httpClient,
+            portableNormalizer: normalizer,
+            provider: provider,
+            performModelTurn: { bodyData in
+                let json = try #require(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+                seenRequests.append(json)
+                if seenRequests.count <= 2 {
                     return WebSearchBridge.ModelResponse(
                         statusCode: 200,
                         headers: [("content-type", "application/json")],
                         bodyData: try assistantResponseBody(content: [
-                            ["type": "tool_use", "id": "toolu_\(turnCount)", "name": "web_search", "input": ["query": "test"]]
-                        ], usage: ["input_tokens": 10, "output_tokens": 1])
+                            ["type": "tool_use", "id": "toolu_a\(seenRequests.count)", "name": "web_search", "input": ["query": "a"]],
+                            ["type": "tool_use", "id": "toolu_b\(seenRequests.count)", "name": "web_search", "input": ["query": "b"]]
+                        ], usage: ["input_tokens": 10, "output_tokens": 2])
                     )
                 }
-            )
-        }
-        #expect(turnCount == 2)
+                return WebSearchBridge.ModelResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    bodyData: try assistantResponseBody(content: [
+                        ["type": "text", "text": "Search is unavailable right now."]
+                    ], usage: ["input_tokens": 10, "output_tokens": 5])
+                )
+            }
+        )
+
+        // One failing provider call; the other three requested searches never reach the provider.
+        #expect(providerCalls == 1)
+        #expect(seenRequests.count == 3)
+        #expect(result.clientResponse.statusCode == 200)
+        #expect(result.webSearchRequestCount == 0)
+
+        let secondMessages = try #require(seenRequests[1]["messages"] as? [[String: Any]])
+        let toolResults = try #require(secondMessages.last?["content"] as? [[String: Any]])
+        #expect(toolResults.count == 2)
+        #expect(toolResults.allSatisfy { $0["is_error"] as? Bool == true })
+        #expect(toolResults.allSatisfy { ($0["content"] as? String)?.contains("too_many_requests") == true })
+
+        let sse = result.clientResponse.bodyChunks.map { String(decoding: $0, as: UTF8.self) }.joined()
+        #expect(sse.contains("\"error_code\":\"too_many_requests\""))
+        #expect(sse.contains("Search is unavailable right now."))
     }
 
     @Test func stepOutcomeThrowsMixedToolUseUnsupported() throws {
@@ -406,6 +531,14 @@ private struct CountingWebSearchProvider: WebSearchBridgeProviding {
 
     func search(query: String, maxResults: Int, httpClient: HTTPClient) async throws -> [WebSearchResult] {
         handler(query)
+    }
+}
+
+private struct FailingWebSearchProvider: WebSearchBridgeProviding {
+    let makeError: @Sendable () -> Error
+
+    func search(query: String, maxResults: Int, httpClient: HTTPClient) async throws -> [WebSearchResult] {
+        throw makeError()
     }
 }
 
