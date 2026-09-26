@@ -13,10 +13,6 @@ enum VendorDefaults {
         return baseURL.lowercased().contains("api.deepseek.com")
     }
 
-    static func supportsAnthropicCountTokens(forBaseURL baseURL: String) -> Bool {
-        isDeepSeekBaseURL(baseURL) ? false : supportsAnthropicCountTokens
-    }
-
     static func repairsAnthropicToolCalls(forBaseURL baseURL: String) -> Bool {
         isDeepSeekBaseURL(baseURL) ? true : repairsAnthropicToolCalls
     }
@@ -81,7 +77,7 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         self.supportedModels = supportedModels
         self.supportsThinkingBlocks = supportsThinkingBlocks
         self.supportsAnthropicCountTokens = supportsAnthropicCountTokens
-            ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+            ?? VendorDefaults.supportsAnthropicCountTokens
         self.repairsAnthropicToolCalls = repairsAnthropicToolCalls
             ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
         self.stripsClaudeOnlyRequestFields = stripsClaudeOnlyRequestFields
@@ -117,7 +113,7 @@ struct Vendor: Identifiable, Codable, Equatable, Sendable {
         supportsThinkingBlocks = (try? c.decode(Bool.self, forKey: .supportsThinkingBlocks))
             ?? VendorDefaults.supportsThinkingBlocks
         supportsAnthropicCountTokens = (try? c.decodeIfPresent(Bool.self, forKey: .supportsAnthropicCountTokens))
-            ?? VendorDefaults.supportsAnthropicCountTokens(forBaseURL: baseURL)
+            ?? VendorDefaults.supportsAnthropicCountTokens
         repairsAnthropicToolCalls = (try? c.decodeIfPresent(Bool.self, forKey: .repairsAnthropicToolCalls))
             ?? VendorDefaults.repairsAnthropicToolCalls(forBaseURL: baseURL)
         stripsClaudeOnlyRequestFields = (try? c.decodeIfPresent(Bool.self, forKey: .stripsClaudeOnlyRequestFields))

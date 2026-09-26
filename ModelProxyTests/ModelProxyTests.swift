@@ -105,7 +105,8 @@ struct ModelProxyTests {
         }
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(Vendor.self, from: legacyJSON)
-        #expect(decoded.supportsAnthropicCountTokens == false)
+        // DeepSeek's Anthropic endpoint answers count_tokens (verified 2026-09-26), so no DeepSeek override.
+        #expect(decoded.supportsAnthropicCountTokens == true)
         #expect(decoded.repairsAnthropicToolCalls == true)
     }
 
