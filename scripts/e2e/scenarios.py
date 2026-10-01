@@ -249,10 +249,31 @@ def websearch():
     return ok, f"bridge requests={bridged} bridge failures={failures} result={(s['result'] or {}).get('result', '')[:60]!r}"
 
 
+def artifact_schema():
+    """Regression: CC Artifact file_paths excludes NUL using an ECMA regex escape."""
+    for stream in (False, True):
+        status, raw, _ = request("POST", "/v1/messages", {
+            "model": "claude-sonnet-5", "max_tokens": 128, "stream": stream,
+            "messages": [{"role": "user", "content": "Reply OK without using tools."}],
+            "tools": [{"name": "Artifact", "description": "Manage artifact files",
+                       "input_schema": {"type": "object", "properties": {
+                           "file_paths": {"type": "array", "items": {
+                               "type": "string", "pattern": r"^[^\0]*$"}}}}}],
+        })
+        if status != 200:
+            return False, f"stream={stream}: HTTP {status} {raw[:300]!r}"
+        if stream:
+            if b"event: message_stop" not in raw or b"event: error" in raw:
+                return False, "stream did not complete successfully"
+        elif json.loads(raw).get("type") != "message":
+            return False, "non-streaming response was not a message"
+    return True, "Artifact NUL-excluding schema: JSON and SSE both completed with HTTP 200"
+
+
 SCENARIOS = [
     head_probe, count_tokens_forwarded, count_tokens_local_404, malformed_body_fast,
     concurrent_same_session_isolated, identical_retry_joined, passthrough_relays_anthropic,
-    cc_text, cc_tools, cc_strip_vendor, cc_no_thinking_vendor, cc_subagents, cc_continue,
+    artifact_schema, cc_text, cc_tools, cc_strip_vendor, cc_no_thinking_vendor, cc_subagents, cc_continue,
 ]
 OPT_IN = [websearch]
 

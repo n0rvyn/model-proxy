@@ -7,6 +7,67 @@ import Testing
 
 struct ProxyForwarderTests {
 
+    @Test func toolSchemaNulEscapeNormalizationPreservesOtherEscapes() {
+        let cases: [(String, String)] = [
+            (#"^[^\0]*$"#, #"^[^\u0000]*$"#),
+            (#"\\0"#, #"\\0"#),
+            (#"\\\0"#, #"\\\u0000"#),
+            (#"\01\012\09"#, #"\01\012\09"#),
+            (#"\u0000\x00\n"#, #"\u0000\x00\n"#),
+            (#"路径\0😀\0"#, #"路径\u0000😀\u0000"#),
+        ]
+        for (input, expected) in cases {
+            #expect(ProxyForwarder.portableSchemaPattern(input) == expected)
+        }
+    }
+
+    @Test func toolSchemaNormalizationVisitsSchemasButNotInstanceValues() throws {
+        let pattern = #"^[^\0]*$"#
+        let leaf: [String: Any] = ["type": "string", "pattern": pattern]
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": ["file_paths": ["type": "array", "items": leaf], "pattern": leaf],
+            "$defs": ["path": leaf], "definitions": ["legacy": leaf],
+            "anyOf": [leaf], "allOf": [leaf], "oneOf": [leaf],
+            "not": leaf, "if": leaf, "then": leaf, "else": leaf,
+            "prefixItems": [leaf], "contains": leaf, "propertyNames": leaf,
+            "additionalProperties": leaf, "unevaluatedProperties": leaf,
+            "additionalItems": leaf, "unevaluatedItems": leaf,
+            "patternProperties": [".*": leaf],
+            "dependentSchemas": ["file": leaf], "dependencies": ["file": leaf, "names": ["file"]],
+            "enum": [["pattern": pattern]], "const": ["pattern": pattern],
+            "examples": [["pattern": pattern]], "default": ["pattern": pattern],
+            "description": pattern,
+        ]
+        let body = try JSONSerialization.data(withJSONObject: [
+            "tools": [["name": "Artifact", "input_schema": schema]],
+            "messages": [["role": "user", "content": pattern]],
+        ])
+        let transformed = ProxyForwarder.normalizeToolSchemaPatterns(in: body, isPassthrough: false)
+        let json = try #require(JSONSerialization.jsonObject(with: transformed) as? [String: Any])
+        let tools = try #require(json["tools"] as? [[String: Any]])
+        let output = try #require(tools[0]["input_schema"] as? [String: Any])
+        // Every schema position above must change; instance-valued annotations must not.
+        let before = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
+        let expectedText = String(decoding: before, as: UTF8.self)
+            .replacingOccurrences(of: #"^[^\\0]*$"#, with: #"^[^\\u0000]*$"#)
+        let expectedData = Data(expectedText.utf8)
+        var expected = try #require(JSONSerialization.jsonObject(with: expectedData) as? [String: Any])
+        for key in ["enum", "const", "examples", "default", "description"] { expected[key] = schema[key] }
+        #expect(NSDictionary(dictionary: output).isEqual(to: expected))
+        #expect((json["messages"] as? [[String: String]])?.first?["content"] == pattern)
+        #expect(ProxyForwarder.normalizeToolSchemaPatterns(in: body, isPassthrough: true) == body)
+        #expect(ProxyForwarder.normalizeToolSchemaPatterns(in: transformed, isPassthrough: false) == transformed)
+    }
+
+    @Test func toolSchemaNormalizationPreservesUnchangedBytes() {
+        for body in [#"{ "tools": [{"name":"Read","input_schema":{"type":"object"}}] }"#,
+                     #"{"messages":[],"tools":[]}"#, "not json"] {
+            let data = Data(body.utf8)
+            #expect(ProxyForwarder.normalizeToolSchemaPatterns(in: data, isPassthrough: false) == data)
+        }
+    }
+
     @Test func branchWaitBudgetStopsAfterConfiguredLimit() {
         var budget = ProxyForwarder.BranchWaitBudget(maxAttempts: 3)
 

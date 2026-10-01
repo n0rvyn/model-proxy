@@ -777,7 +777,7 @@ enum ProxyForwarder {
 
         let upstreamHeaders = Self.upstreamHeaders(from: head.headers, target: target)
 
-        var bodyData = bodyData
+        var bodyData = Self.normalizeToolSchemaPatterns(in: bodyData, isPassthrough: target.isPassthrough)
         if !target.isPassthrough, target.stripsClaudeOnlyRequestFields {
             let stripped = Self.stripClaudeOnlyRequestFields(in: bodyData)
             bodyData = stripped.bodyData
@@ -1340,6 +1340,72 @@ enum ProxyForwarder {
             return ClaudeOnlyFieldStripResult(bodyData: bodyData, removedFields: [])
         }
         return ClaudeOnlyFieldStripResult(bodyData: encoded, removedFields: removed)
+    }
+
+    /// Normalize only schema `pattern` keywords, never instance values or message content.
+    /// ECMA's standalone NUL escape is rejected by some compatible endpoints (DeepSeek).
+    /// The Unicode spelling has identical semantics. Run per target so bridge/failover
+    /// requests are covered, while signed passthrough bodies remain byte-identical.
+    static func normalizeToolSchemaPatterns(in bodyData: Data, isPassthrough: Bool) -> Data {
+        guard !isPassthrough,
+              var json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+              var tools = json["tools"] as? [[String: Any]] else { return bodyData }
+        var changed = false
+        func schema(_ value: Any) -> Any {
+            if let array = value as? [Any] { return array.map(schema) }
+            guard var object = value as? [String: Any] else { return value }
+            if let pattern = object["pattern"] as? String {
+                let normalized = portableSchemaPattern(pattern)
+                if normalized != pattern {
+                    object["pattern"] = normalized
+                    changed = true
+                }
+            }
+            // These values are maps of schemas, not schemas themselves. In particular,
+            // a property named "pattern" must not be treated as a regex keyword.
+            for key in ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"] {
+                if let children = object[key] as? [String: Any] {
+                    object[key] = children.mapValues(schema)
+                }
+            }
+            for key in ["items", "prefixItems", "additionalItems", "contains", "unevaluatedItems",
+                        "additionalProperties", "unevaluatedProperties", "propertyNames",
+                        "allOf", "anyOf", "oneOf", "not", "if", "then", "else"] {
+                if let child = object[key] { object[key] = schema(child) }
+            }
+            return object
+        }
+        for index in tools.indices {
+            if let input = tools[index]["input_schema"] { tools[index]["input_schema"] = schema(input) }
+        }
+        guard changed else { return bodyData }
+        json["tools"] = tools
+        return (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? bodyData
+    }
+
+    static func portableSchemaPattern(_ pattern: String) -> String {
+        let scalars = Array(pattern.unicodeScalars)
+        var result = String.UnicodeScalarView()
+        var index = 0
+        while index < scalars.count {
+            let scalar = scalars[index]
+            guard scalar == "\\", index + 1 < scalars.count else {
+                result.append(scalar)
+                index += 1
+                continue
+            }
+            let escaped = scalars[index + 1]
+            let followedByDigit = index + 2 < scalars.count && (48...57).contains(scalars[index + 2].value)
+            if escaped == "0", !followedByDigit {
+                result.append(contentsOf: #"\u0000"#.unicodeScalars)
+            } else {
+                result.append(scalar)
+                result.append(escaped)
+            }
+            // Consume the whole escape so \\0 stays a literal backslash and zero.
+            index += 2
+        }
+        return String(result)
     }
 
     /// Remove tool definitions that mapped vendors cannot handle.
