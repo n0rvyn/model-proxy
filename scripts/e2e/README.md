@@ -50,6 +50,7 @@ Work files go to `${TMPDIR%/}/modelproxy-e2e` (override with `MP_E2E_ROOT`). A f
 | `identical_retry_joined` | an identical concurrent retry still joins the in-flight call |
 | `passthrough_relays_anthropic` | an unmapped model on the passthrough client reaches Anthropic and its error comes back unmodified |
 | `cc_text` | plain Claude Code turn through a mapped vendor |
+| `artifact_schema` | Claude Code Artifact's NUL-excluding file-path pattern is accepted by DeepSeek in both JSON and streaming requests |
 | `cc_tools` | multi-turn Read / Edit / Bash with branch reuse |
 | `cc_strip_vendor` | Strip Claude-Only Request Fields removes fields and the vendor still answers |
 | `cc_no_thinking_vendor` | Supports Thinking Blocks off still works for DeepSeek's own tool calls |

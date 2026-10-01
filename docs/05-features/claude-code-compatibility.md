@@ -16,6 +16,7 @@ documented compatibility behaviors ModelProxy applies (verified against CC 2.1.2
 | No `x-claude-code-*` to vendors | Mapped routes | Session/agent headers are not forwarded to third parties; passthrough keeps them |
 | Strip Claude-only fields (opt-in) | Vendor toggle **Strip Claude-Only Request Fields** | Removes `context_management`, `output_config`, `safeguards`, `speed`, `thread`, tool `strict`/`defer_loading`/`eager_input_streaming`, and the `anthropic-beta` header, per upstream attempt |
 | Tool-call shape repair | Vendor toggle **Repair Tool Call Inputs** (default DeepSeek) | Non-object `input` → object (parsed if it is a JSON string, else `{}`), missing input/id inserted, name trimmed / case-matched. Argument content is left for CC to validate. Only a nameless call is removed, and `stop_reason` becomes `end_turn` if no tool call remains |
+| Tool-schema NUL patterns | Mapped routes, per upstream attempt including search bridge and failover | Standalone `\0` in tool input-schema `pattern` keywords becomes equivalent `\u0000`. DeepSeek rejects the former in Claude Code's Artifact file-path schema. Tools and constraints are retained; escaped backslashes, digit-followed escapes, instance values (`enum`, `const`, defaults, examples), and passthrough bodies are unchanged |
 | Passthrough timeout | Unmapped / passthrough routes | 600 s to the response head (CC's `API_TIMEOUT_MS` default). Streams are never cut by this deadline |
 | Branch replay measurement | A portable request reused branch history | Logs `BranchReplay restored thinking blocks=N` when replay restored thinking the client did not send |
 
@@ -40,8 +41,24 @@ documented compatibility behaviors ModelProxy applies (verified against CC 2.1.2
 
 ## Change History
 
+### Artifact schema regression verification (2026-10-01)
+
+- Direct DeepSeek requests: three original/normalized comparisons each for `deepseek-flash`
+  and `deepseek-v4-pro`; original pattern returned 400, normalized pattern returned 200 in every pair.
+- The new `artifact_schema` scenario failed against the original compiled proxy with the same 400,
+  then passed against the fixed proxy for both JSON and SSE responses.
+- 180 macOS tests passed, with zero failures or skips. All 14 standard E2E scenarios passed,
+  including real Claude Code 2.1.285 tools, subagents, continuation, and passthrough.
+- Six additional Artifact + search-bridge requests completed with 200 (three rounds each for
+  JSON and SSE). These requests disabled tool use, so no search-provider quota was consumed.
+- The initial E2E run used the app's compiled `ProxyServer` through a temporary launcher on
+  isolated ports 19090/19092. After Accessibility was enabled, the fixed app also started
+  successfully through its menu-bar icon. All four follow-up scenarios passed through that
+  app: Artifact JSON/SSE, Claude Code text, Read/Edit/Bash tool calls, and Anthropic passthrough.
+
 | Date | Change |
 |------|--------|
+| 2026-10-01 | Normalize tool-schema NUL escapes: direct DeepSeek comparison reproduced 400 for `^[^\0]*$` and 200 for `^[^\u0000]*$` |
 | 2026-09-25 | Initial version from the CC 2.1.282 coverage audit (`docs/01-discovery/2026-09-25-claude-code-feature-coverage-audit.md`) |
 | 2026-09-26 | Session coordination scope gains a request-shape fingerprint: two concurrent same-session requests with identical `messages` and different system prompts got one shared response (reproduced against DeepSeek with CC 2.1.283) |
 | 2026-09-26 | Supports Count Tokens defaults on for DeepSeek too: `https://api.deepseek.com/anthropic/v1/messages/count_tokens` answers 200. Vendors already saved keep their stored value |
