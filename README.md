@@ -126,11 +126,10 @@ After launch, open the menu bar app and configure:
 
 ### 3. Point tools at the local listeners
 
-Example for the default ports:
+In **Settings → Clients → Claude Code**, choose a connection mode and copy **Quick Start**. Paste the command into your terminal to start a new Claude Code session.
 
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-```
+- **Claude Subscription** uses your existing Claude Code login for passthrough. Set a local proxy token to require local authentication. Quick Start sends that token in a separate header, while the subscription stays in the Authorization header.
+- **Vendor Only** requires a local proxy token and passes it as `ANTHROPIC_AUTH_TOKEN`. Claude Code can start without signing in. Only models with a vendor mapping can run in this mode.
 
 For Codex installations that need a different local endpoint, use the command shown in the `Clients` tab for that client.
 

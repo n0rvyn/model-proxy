@@ -47,16 +47,6 @@ enum ProxyForwarder {
             return
         }
 
-        let requestKind = requestKind(for: head.uri)
-        let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
-        let requestScopes = requestScopeKeys(
-            bodyData: originalBodyData,
-            headers: head.headers,
-            clientName: clientName,
-            channel: channel
-        )
-        let requestClass = Self.claudeCodeRequestClass(from: head.headers)
-
         // 1. Extract original API key (support both x-api-key and Authorization: Bearer).
         let originalAPIKey = Self.extractAPIKey(from: head.headers)
 
@@ -65,12 +55,22 @@ enum ProxyForwarder {
         let model: String
         var routeState: RoutingSnapshot.RouteState
         do {
-            (resolveResult, model, routeState) = try await router.resolve(bodyBytes: body, originalAPIKey: originalAPIKey)
+            (resolveResult, model, routeState) = try await router.resolve(
+                bodyBytes: body, originalAPIKey: originalAPIKey, headers: head.headers
+            )
+        } catch RouterError.unauthorized {
+            let data = try? JSONSerialization.data(withJSONObject: [
+                "type": "error",
+                "error": ["type": "authentication_error", "message": RouterError.unauthorized.description]
+            ])
+            await Self.sendResponse(channel: channel, status: .unauthorized, contentType: "application/json", body: data ?? Data())
+            return
         } catch {
             await Self.sendError(channel: channel, status: .badRequest, message: "Bad request: \(error)")
             return
         }
 
+        let requestClass = Self.claudeCodeRequestClass(from: head.headers)
         let resolvedTarget: RoutingSnapshot.RouteTarget
         switch resolveResult {
         case .routed(let t):
@@ -88,6 +88,14 @@ enum ProxyForwarder {
             return
         }
 
+        let requestKind = requestKind(for: head.uri)
+        let originalBodyData = body.getData(at: body.readerIndex, length: body.readableBytes) ?? Data()
+        let requestScopes = requestScopeKeys(
+            bodyData: originalBodyData,
+            headers: head.headers,
+            clientName: clientName,
+            channel: channel
+        )
         let target = resolvedTarget
         if Self.answersCountTokensLocally(requestKind: requestKind, target: target) {
             // Token counting is optional for Claude Code: on a 404 it falls back to a local estimate.
@@ -824,7 +832,7 @@ enum ProxyForwarder {
         var upstreamHeaders = HTTPHeaders()
         for (name, value) in requestHeaders {
             let lower = name.lowercased()
-            if lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length" || lower == "accept-encoding" { continue }
+            if lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length" || lower == "accept-encoding" || lower == ClientConfig.localAuthHeader.lowercased() { continue }
             // Claude Code session/agent identifiers are meant for the local gateway, not third-party vendors.
             if !target.isPassthrough, lower.hasPrefix("x-claude-code-") { continue }
             if !target.isPassthrough, target.stripsClaudeOnlyRequestFields, lower == "anthropic-beta" { continue }

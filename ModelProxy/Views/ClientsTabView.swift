@@ -23,7 +23,10 @@ private struct ClientRowSection: View {
     let index: Int
 
     @State private var portText: String = ""
+    @State private var tokenText = ""
+    @State private var isTokenVisible = false
     @State private var showCopied: Bool = false
+    @FocusState private var editingToken: Bool
 
     private var client: ClientConfig { configStore.config.clients[index] }
 
@@ -33,18 +36,62 @@ private struct ClientRowSection: View {
     }
 
     private var envExportCommand: String {
-        let toolCommand: String
-        switch client.clientName.lowercased() {
-        case let n where n.contains("claude"):
-            toolCommand = "claude"
-        case let n where n.contains("codex"):
-            toolCommand = "codex"
-        default:
-            toolCommand = client.clientName.lowercased()
+        let name = client.clientName.lowercased()
+        let toolCommand = name.contains("codex") ? "codex" : name
+        return "export ANTHROPIC_BASE_URL=http://localhost:\(client.port) && \\\(toolCommand)"
+    }
+
+    private var quickStartClient: ClientConfig {
+        var draft = client
+        let token = tokenText.trimmingCharacters(in: .whitespaces)
+        draft.localAuthToken = token.isEmpty ? nil : token
+        return draft
+    }
+
+    private var canCopyQuickStart: Bool {
+        !client.isClaudeCode || quickStartClient.claudeQuickStartCommand() != nil
+    }
+
+    private func saveLocalToken() {
+        let token = quickStartClient.localAuthToken
+        guard ClientConfig.isValidLocalAuthToken(token ?? ""), token != client.localAuthToken else { return }
+        configStore.config.clients[index].localAuthToken = token
+        configStore.saveAndReload(proxyServer: proxyServer)
+    }
+
+    private var localTokenField: some View {
+        let prompt = Text(client.isVendorOnly ? "Required" : "Optional")
+        let visibilityAction = isTokenVisible ? "Hide local proxy token" : "Show local proxy token"
+
+        return LabeledContent("Local proxy token") {
+            HStack(spacing: 6) {
+                Group {
+                    if isTokenVisible {
+                        TextField("Local proxy token", text: $tokenText, prompt: prompt)
+                            .autocorrectionDisabled()
+                    } else {
+                        SecureField("Local proxy token", text: $tokenText, prompt: prompt)
+                    }
+                }
+                .labelsHidden()
+                .focused($editingToken)
+                .onSubmit(saveLocalToken)
+                .onChange(of: editingToken) { _, editing in
+                    if !editing { saveLocalToken() }
+                }
+
+                Button {
+                    isTokenVisible.toggle()
+                } label: {
+                    Label(visibilityAction, systemImage: isTokenVisible ? "eye.slash" : "eye")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .help(visibilityAction)
+            }
         }
-        // Gateway hint headers let the traffic list label subagent, compaction and auxiliary requests.
-        let hintHeaders = toolCommand == "claude" ? " CLAUDE_CODE_GATEWAY_HINT_HEADERS=1" : ""
-        return "export ANTHROPIC_BASE_URL=http://localhost:\(client.port)\(hintHeaders) && \\\(toolCommand)"
+        .onAppear { tokenText = client.localAuthToken ?? "" }
+        .onDisappear { isTokenVisible = false }
     }
 
     var body: some View {
@@ -74,8 +121,29 @@ private struct ClientRowSection: View {
             .autocorrectionDisabled()
             .textContentType(nil)
 
+            if client.isClaudeCode {
+                Picker("Connection mode", selection: Binding(
+                    get: { client.claudeConnectionMode },
+                    set: { mode in
+                        configStore.config.clients[index].claudeConnectionMode = mode
+                        configStore.saveAndReload(proxyServer: proxyServer)
+                    }
+                )) {
+                    Text("Claude Subscription").tag(ClaudeConnectionMode.subscription)
+                    Text("Vendor Only").tag(ClaudeConnectionMode.vendorOnly)
+                }
+
+                localTokenField
+
+                if !ClientConfig.isValidLocalAuthToken(tokenText) {
+                    Text("Use printable ASCII characters on one line.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
             Picker("Unmapped models", selection: Binding(
-                get: { configStore.config.clients[index].unmappedPolicy },
+                get: { client.isVendorOnly ? .block : client.unmappedPolicy },
                 set: { newValue in
                     configStore.config.clients[index].unmappedPolicy = newValue
                     configStore.saveAndReload(proxyServer: proxyServer)
@@ -85,8 +153,9 @@ private struct ClientRowSection: View {
                 Text("Route to vendor").tag(UnmappedModelPolicy.routeAll)
                 Text("Block").tag(UnmappedModelPolicy.block)
             }
+            .disabled(client.isVendorOnly)
 
-            if client.unmappedPolicy == .routeAll {
+            if !client.isVendorOnly && client.unmappedPolicy == .routeAll {
                 Picker("Fallback vendor", selection: Binding(
                     get: { configStore.config.clients[index].fallbackVendorID },
                     set: { newValue in
@@ -111,21 +180,32 @@ private struct ClientRowSection: View {
 
             LabeledContent("Quick start") {
                 HStack(spacing: 6) {
-                    Text(envExportCommand)
+                    Text(client.isClaudeCode
+                         ? (quickStartClient.claudeQuickStartCommand(maskToken: true) ?? "Set a valid local proxy token")
+                         : envExportCommand)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
                     Button(showCopied ? "Copied" : "Copy") {
+                        let command: String
+                        if client.isClaudeCode {
+                            guard let quickStart = quickStartClient.claudeQuickStartCommand() else { return }
+                            saveLocalToken()
+                            command = quickStart
+                        } else {
+                            command = envExportCommand
+                        }
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(envExportCommand, forType: .string)
+                        NSPasteboard.general.setString(command, forType: .string)
                         showCopied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             showCopied = false
                         }
                     }
                     .buttonStyle(MPInlineButtonStyle(color: showCopied ? .green : nil))
+                    .disabled(!canCopyQuickStart)
                     .accessibilityLabel("Copy quick start command for \(client.clientName)")
                     .accessibilityHint("Copies the export command to clipboard.")
                 }

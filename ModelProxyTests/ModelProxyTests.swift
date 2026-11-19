@@ -149,7 +149,9 @@ struct ModelProxyTests {
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
             clientName: "Claude Code",
             port: 8080,
-            defaultUpstream: "https://api.anthropic.com"
+            defaultUpstream: "https://api.anthropic.com",
+            localAuthToken: "fixture-local-token",
+            claudeConnectionMode: .vendorOnly
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ClientConfig.self, from: data)
@@ -172,6 +174,8 @@ struct ModelProxyTests {
         #expect(decoded.clientName == "Claude Code")
         #expect(decoded.port == 8080)
         #expect(decoded.defaultUpstream == "") // empty = needs migration in ConfigStore
+        #expect(decoded.localAuthToken == nil)
+        #expect(decoded.claudeConnectionMode == .subscription)
     }
 
     // MARK: - ModelMapping round-trip

@@ -1,4 +1,5 @@
 import Foundation
+import NIOHTTP1
 import OSLog
 
 /// Routing snapshot for one client port.
@@ -96,12 +97,16 @@ struct RoutingSnapshot: Sendable {
     private let unmappedPolicy: UnmappedModelPolicy
     /// Fallback vendor target (resolved at snapshot build time); used when policy is .routeAll.
     private let fallbackTarget: RouteTarget?
+    private let localAuthToken: String?
+    private let isVendorOnly: Bool
 
     /// Build a snapshot for a specific client port.
     /// - Parameters:
     ///   - config: full AppConfig (provides global modelMappings + vendor lookup)
     ///   - clientConfig: the ClientConfig whose port received the request
     init(from config: AppConfig, for clientConfig: ClientConfig) {
+        localAuthToken = clientConfig.isClaudeCode ? clientConfig.localAuthToken : nil
+        isVendorOnly = clientConfig.isVendorOnly
         var mappings: [String: [RouteTarget]] = [:]
         for mapping in config.modelMappings {
             guard mapping.isEnabled else {
@@ -190,6 +195,26 @@ struct RoutingSnapshot: Sendable {
         }
     }
 
+    nonisolated func authorizes(_ headers: HTTPHeaders) -> Bool {
+        guard let token = localAuthToken, !token.isEmpty else { return !isVendorOnly }
+        let values = headers[isVendorOnly ? "Authorization" : ClientConfig.localAuthHeader]
+        guard values.count == 1, let value = values.first else { return false }
+        let supplied: Substring
+        if isVendorOnly {
+            guard let space = value.firstIndex(of: " "),
+                  value[..<space].lowercased() == "bearer" else { return false }
+            supplied = value[value.index(after: space)...]
+        } else {
+            supplied = value[...]
+        }
+        guard supplied.utf8.count == token.utf8.count else { return false }
+        var difference: UInt8 = 0
+        for (actual, expected) in zip(supplied.utf8, token.utf8) {
+            difference |= actual ^ expected
+        }
+        return difference == 0
+    }
+
     /// Resolve a route for the given model.
     func resolve(model: String, originalAPIKey: String) -> (result: ResolveResult, state: RouteState) {
         // Exact match first, then prefix match (longest-prefix-wins).
@@ -201,6 +226,9 @@ struct RoutingSnapshot: Sendable {
         }
 
         let defaultState = RouteState()
+        if isVendorOnly {
+            return (.blocked(reason: "This model has no vendor mapping. Add a mapping in Routing or switch to Claude Subscription in Settings, then copy Quick Start again."), defaultState)
+        }
         switch unmappedPolicy {
         case .passthrough:
             return (.routed(passthroughTarget(originalAPIKey: originalAPIKey)), defaultState)

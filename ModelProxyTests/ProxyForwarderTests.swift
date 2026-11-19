@@ -167,6 +167,8 @@ struct ProxyForwarderTests {
     @Test func mappedVendorsDoNotReceiveClaudeCodeHeadersOrClientCredentials() {
         let request: HTTPHeaders = [
             "x-api-key": "client-key",
+            "Authorization": "Bearer subscription-fixture",
+            "X-ModelProxy-Token": "local-fixture",
             "anthropic-version": "2023-06-01",
             "X-Claude-Code-Session-Id": "sess-1",
             "x-claude-code-agent-id": "agent-7",
@@ -179,12 +181,60 @@ struct ProxyForwarderTests {
         #expect(!vendorHeaders.contains(name: "x-claude-code-session-id"))
         #expect(!vendorHeaders.contains(name: "x-claude-code-agent-id"))
         #expect(vendorHeaders["x-api-key"] == ["vendor-key"])
+        #expect(vendorHeaders["authorization"] == ["Bearer vendor-key"])
+        #expect(!vendorHeaders.contains(name: "x-modelproxy-token"))
         #expect(vendorHeaders["anthropic-version"] == ["2023-06-01"])
         #expect(vendorHeaders["host"] == ["api.deepseek.com"])
 
         let passthroughHeaders = ProxyForwarder.upstreamHeaders(from: request, target: passthrough)
         #expect(passthroughHeaders["x-claude-code-session-id"] == ["sess-1"])
         #expect(passthroughHeaders["x-api-key"] == ["client-key"])
+        #expect(passthroughHeaders["authorization"] == ["Bearer subscription-fixture"])
+        #expect(!passthroughHeaders.contains(name: "x-modelproxy-token"))
+    }
+
+    @MainActor @Test func localAuthUsesTheConfiguredHeaderAndAllowsLegacyClients() async throws {
+        var client = ClientConfig(clientName: "Claude Code", port: 8080, defaultUpstream: "https://api.anthropic.com")
+        let config = AppConfig()
+        let router = RequestRouter(snapshot: RoutingSnapshot(from: config, for: client))
+        let body = ByteBuffer(string: #"{"model":"unknown-model"}"#)
+        let subscription: HTTPHeaders = ["Authorization": "Bearer oauth-fixture"]
+        let bearer: HTTPHeaders = ["Authorization": "Bearer local-fixture"]
+        let local: HTTPHeaders = ["X-ModelProxy-Token": "local-fixture", "Authorization": "Bearer oauth-fixture"]
+
+        let legacy = try await router.resolve(bodyBytes: body, originalAPIKey: "", headers: subscription)
+        guard case .routed(let legacyRoute) = legacy.result else {
+            Issue.record("Expected legacy subscription passthrough")
+            return
+        }
+        #expect(legacyRoute.isPassthrough)
+
+        client.localAuthToken = "local-fixture"
+        await router.updateSnapshot(RoutingSnapshot(from: config, for: client))
+        await #expect(throws: RouterError.unauthorized) {
+            try await router.resolve(bodyBytes: ByteBuffer(), originalAPIKey: "", headers: subscription)
+        }
+        await #expect(throws: RouterError.unauthorized) {
+            try await router.resolve(bodyBytes: body, originalAPIKey: "", headers: bearer)
+        }
+        let authenticated = try await router.resolve(bodyBytes: body, originalAPIKey: "", headers: local)
+        guard case .routed(let route) = authenticated.result else {
+            Issue.record("Expected authenticated subscription passthrough")
+            return
+        }
+        #expect(route.isPassthrough)
+
+        client.claudeConnectionMode = .vendorOnly
+        await router.updateSnapshot(RoutingSnapshot(from: config, for: client))
+        await #expect(throws: RouterError.unauthorized) {
+            try await router.resolve(bodyBytes: body, originalAPIKey: "", headers: local)
+        }
+        let vendorOnly = try await router.resolve(bodyBytes: body, originalAPIKey: "", headers: bearer)
+        guard case .blocked(let message) = vendorOnly.result else {
+            Issue.record("Vendor Only routed an unmapped model")
+            return
+        }
+        #expect(message.contains("no vendor mapping"))
     }
 
     @Test func stripClaudeOnlyRequestFieldsRemovesBodyAndToolFieldsOnly() throws {

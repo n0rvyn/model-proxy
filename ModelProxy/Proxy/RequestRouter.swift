@@ -1,6 +1,7 @@
 import Foundation
 import NIOCore
 import NIOFoundationCompat
+import NIOHTTP1
 
 /// Thread-safe routing resolver.
 /// Holds an atomic snapshot of routing config; swapped on config change.
@@ -20,8 +21,10 @@ actor RequestRouter {
     /// Parse raw HTTP body bytes, extract the `model` field, and return a resolved target.
     func resolve(
         bodyBytes: ByteBuffer,
-        originalAPIKey: String
+        originalAPIKey: String,
+        headers: HTTPHeaders
     ) throws -> (result: RoutingSnapshot.ResolveResult, model: String, state: RoutingSnapshot.RouteState) {
+        guard snapshot.authorizes(headers) else { throw RouterError.unauthorized }
         guard let data = bodyBytes.getData(at: bodyBytes.readerIndex, length: bodyBytes.readableBytes) else {
             throw RouterError.unreadableBody
         }
@@ -44,12 +47,14 @@ actor RequestRouter {
     }
 }
 
-enum RouterError: Error, CustomStringConvertible {
+enum RouterError: Error, Equatable, CustomStringConvertible {
+    case unauthorized
     case unreadableBody
     case missingModelField
 
     var description: String {
         switch self {
+        case .unauthorized:     return "ModelProxy authentication failed. Check the local proxy token in Settings and copy Quick Start again."
         case .unreadableBody:   return "Request body could not be read as bytes"
         case .missingModelField: return "Request JSON missing or empty 'model' field"
         }
